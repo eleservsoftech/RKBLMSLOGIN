@@ -22,8 +22,7 @@ from models import UserModel, LoginModel, UserTypeModel
 @strawberry.type
 class UserTypeType:
     id: str = strawberry.field(name="_id")
-    # Change 'name' to 'usertype' to match your MongoDB field if you don't rename it
-    usertype: str = strawberry.field(name="usertype") # Assuming your field is 'usertype'
+    usertype: str = strawberry.field(name="usertype")  # Assuming your field is 'usertype'
     created_at: datetime = strawberry.field(name="createdAt")
 
 @strawberry.type
@@ -37,10 +36,6 @@ class UserType:
     is_deleted: bool = strawberry.field(name="isDeleted")
     created_at: datetime = strawberry.field(name="createdAt")
 
-@strawberry.type
-class UserError:
-    message: str
-
 @strawberry.input
 class UserInput:
     name: str
@@ -48,12 +43,18 @@ class UserInput:
     phone: str
     password: str
 
+# ✅ New: Unified response type for mutations
+@strawberry.type
+class UserResponse:
+    status: int
+    message: str
+    data: Optional[UserType] = None
+
 # --- GraphQL Queries ---
 @strawberry.type
 class Query:
     @strawberry.field
     def all_users(self) -> List[UserType]:
-        """Fetch all active users from the MongoDB 'users' collection."""
         try:
             users = list(users_collection.find({"is_deleted": False}))
             return [
@@ -74,23 +75,21 @@ class Query:
 
     @strawberry.field
     def all_user_types(self) -> List[UserTypeType]:
-        """Fetch all user types."""
         try:
             usertypes = list(usertypes_collection.find())
             return [
                 UserTypeType(
                     id=str(ut["_id"]),
-                    usertype=ut["usertype"], # Changed from ut["name"] to ut["usertype"]
+                    usertype=ut["usertype"],
                     created_at=ut["createdAt"]
                 ) for ut in usertypes
             ]
         except PyMongoError as e:
             print(f"MongoDB Error: {e}")
             return []
-            
+
     @strawberry.field
     def user(self, user_id: str) -> Optional[UserType]:
-        """Fetch a single user by ID."""
         try:
             user = users_collection.find_one({"_id": ObjectId(user_id)})
             if user:
@@ -112,27 +111,23 @@ class Query:
 # --- GraphQL Mutations ---
 @strawberry.type
 class Mutation:
+
     @strawberry.mutation
-    def signup(self, input: UserInput) -> Union[UserType, UserError]:
+    def signup(self, input: UserInput) -> UserResponse:
         """Create a new user with a hashed password in MongoDB."""
         try:
-            # Check if user with the given email already exists
-            existing_user_by_email = users_collection.find_one({"email": input.email})
-            if existing_user_by_email:
-                return UserError(message=f"User with email '{input.email}' already exists.")
+            if users_collection.find_one({"email": input.email}):
+                return UserResponse(status=409, message=f"User with email '{input.email}' already exists.")
 
-            # Check if user with the given phone number already exists
-            existing_user_by_phone = users_collection.find_one({"phone": input.phone})
-            if existing_user_by_phone:
-                return UserError(message=f"User with phone '{input.phone}' already exists.")
+            if users_collection.find_one({"phone": input.phone}):
+                return UserResponse(status=409, message=f"User with phone '{input.phone}' already exists.")
 
-            # Get the default usertype_id by searching for 'usertype: "user"'
-            default_usertype = usertypes_collection.find_one({"usertype": "user"}) # Changed from "name" to "usertype"
+            default_usertype = usertypes_collection.find_one({"usertype": "user"})
             if not default_usertype:
-                return UserError(message="Default 'user' usertype not found. Please create it first.")
+                return UserResponse(status=404, message="Default 'user' usertype not found.")
 
             hashed_password = bcrypt.hashpw(input.password.encode('utf-8'), bcrypt.gensalt())
-            
+
             new_user_data = UserModel(
                 name=input.name,
                 email=input.email,
@@ -142,90 +137,74 @@ class Mutation:
                 is_active=True,
                 is_deleted=False
             )
-            
-            # Convert Pydantic model to dictionary
+
             user_dict = new_user_data.model_dump(by_alias=True)
-            
-            # --- CRITICAL FIX: Explicitly remove '_id' if it's None ---
+
             if user_dict.get('_id') is None:
                 del user_dict['_id']
-            # --- END CRITICAL FIX ---
-
-            # --- DEBUGGING PRINT STATEMENT ---
-            print("Data being sent to MongoDB:", user_dict)
-            # --- END DEBUGGING ---
 
             insert_result = users_collection.insert_one(user_dict)
-            
-            # The constructor of UserType expects 'id' and 'usertype_id' as strings
-            return UserType(
-                id=str(insert_result.inserted_id),
-                name=new_user_data.name,
-                email=new_user_data.email,
-                phone=new_user_data.phone,
-                usertype_id=str(new_user_data.usertype_id),
-                is_active=new_user_data.is_active,
-                is_deleted=new_user_data.is_deleted,
-                created_at=new_user_data.created_at
+
+            return UserResponse(
+                status=200,
+                message="Signup successful",
+                data=UserType(
+                    id=str(insert_result.inserted_id),
+                    name=new_user_data.name,
+                    email=new_user_data.email,
+                    phone=new_user_data.phone,
+                    usertype_id=str(new_user_data.usertype_id),
+                    is_active=new_user_data.is_active,
+                    is_deleted=new_user_data.is_deleted,
+                    created_at=new_user_data.created_at
+                )
             )
+
         except (PyMongoError, ValidationError) as e:
-            print(f"Error during signup: {e}")
-            return UserError(message=f"An unexpected error occurred: {e}")
+            return UserResponse(status=500, message=f"An unexpected error occurred: {e}")
 
     @strawberry.mutation
-    def login(self, email: str, password: str) -> Union[UserType, UserError]:
-        """Login a user by verifying their password against MongoDB."""
+    def login(self, email: str, password: str) -> UserResponse:
+        """Login a user by verifying their password."""
         try:
-            # --- DEBUGGING: Print the email being searched ---
             print(f"Attempting to log in with email: {email}")
-            # Corrected: Query for 'isDeleted' to match MongoDB document field name
-            user_doc = users_collection.find_one({"email": email, "isDeleted": False}) 
+            user_doc = users_collection.find_one({"email": email, "isDeleted": False})
 
-            # --- DEBUGGING: Print the user document found (or None) ---
             print(f"User document found: {user_doc}")
 
             if user_doc:
-                # --- DEBUGGING: Print passwords for comparison ---
-                print(f"Provided password: {password}")
-                print(f"Stored hashed password: {user_doc.get('password')}")
-
                 if bcrypt.checkpw(password.encode('utf-8'), user_doc["password"].encode('utf-8')):
                     print(f"User '{user_doc['email']}' logged in successfully.")
-                    
-                    # Create a login entry in the database
+
                     login_entry_data = LoginModel(user_id=user_doc["_id"])
-                    
-                    # Convert Pydantic model to dictionary
                     login_dict = login_entry_data.model_dump(by_alias=True)
-                    
-                    # --- CRITICAL FIX: Explicitly remove '_id' if it's None ---
                     if login_dict.get('_id') is None:
                         del login_dict['_id']
-                    # --- END CRITICAL FIX ---
-
                     logins_collection.insert_one(login_dict)
 
-                    return UserType(
-                        id=str(user_doc["_id"]),
-                        name=user_doc["name"],
-                        email=user_doc["email"],
-                        phone=user_doc["phone"],
-                        usertype_id=str(user_doc["usertype_id"]),
-                        is_active=user_doc["isActive"], # Changed from 'is_active' to 'isActive'
-                        is_deleted=user_doc["isDeleted"], # Changed from 'is_deleted' to 'isDeleted'
-                        created_at=user_doc["created_at"]
+                    return UserResponse(
+                        status=200,
+                        message="Login successful",
+                        data=UserType(
+                            id=str(user_doc["_id"]),
+                            name=user_doc["name"],
+                            email=user_doc["email"],
+                            phone=user_doc["phone"],
+                            usertype_id=str(user_doc["usertype_id"]),
+                            is_active=user_doc["isActive"],
+                            is_deleted=user_doc["isDeleted"],
+                            created_at=user_doc["created_at"]
+                        )
                     )
                 else:
-                    print("Password mismatch detected.")
-                    return UserError(message="Incorrect email or password.")
+                    return UserResponse(status=401, message="Incorrect email or password.")
             else:
-                print("User not found or is deleted.")
-                return UserError(message="Incorrect email or password.")
-        except PyMongoError as e:
-            print(f"Error during login: {e}")
-            return UserError(message=f"An unexpected error occurred: {e}")
-        except Exception as e: # Catch any other unexpected errors
-            print(f"An unexpected error occurred during login: {e}")
-            return UserError(message=f"An unexpected error occurred: {e}")
+                return UserResponse(status=404, message="User not found or is deleted.")
 
+        except PyMongoError as e:
+            return UserResponse(status=500, message=f"Database error: {e}")
+        except Exception as e:
+            return UserResponse(status=500, message=f"Unexpected error: {e}")
+
+# Create the schema
 schema = strawberry.Schema(query=Query, mutation=Mutation)
