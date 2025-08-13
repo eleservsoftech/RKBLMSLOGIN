@@ -62,3 +62,26 @@ class LoginModel(BaseModel):
         arbitrary_types_allowed = True
         # NEW: Exclude fields with None values when dumping the model
         exclude_none = True
+
+
+# --- New Model for Package Creation ---
+
+class PackageModel(BaseModel):
+    id: Optional[str] = Field(alias="_id", default=None)
+    title: str
+    description: Optional[str] = None
+    banner_url: Optional[str] = Field(default=None, alias="bannerUrl")
+    theme_url: Optional[str] = Field(default=None, alias="themeUrl")
+    is_active: bool = Field(default=True, alias="isActive")
+    is_deleted: bool = Field(default=False, alias="isDeleted")
+    created_at: datetime = Field(default_factory=datetime.utcnow, alias="createdAt")
+    updated_at: datetime = Field(default_factory=datetime.utcnow, alias="updatedAt")
+    # ✅ NEW: Add the created_by field
+    # created_by: Optional[ObjectId] = Field(default=None, alias="createdBy")
+    created_by: Optional[str] = Field(default=None, alias="createdBy")
+    updated_by: Optional[ObjectId] = Field(default=None, alias="updated_by")
+
+    class Config:
+        populate_by_name = True
+        arbitrary_types_allowed = True
+        exclude_none = True

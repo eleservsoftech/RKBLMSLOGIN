@@ -1,17 +1,8 @@
-
-
-# mongodb
-
-# Libraries to install:
-# pip install pymongo "pydantic[email]"
-
 # database.py
-# Libraries to install:
-# pip install pymongo
-
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
+from urllib.parse import quote_plus
 
 # --- Load Environment Variables ---
 load_dotenv()  # Loads variables from .env file into environment
@@ -23,9 +14,14 @@ MONGO_HOST = os.getenv("MONGO_HOST")
 MONGO_PORT = os.getenv("MONGO_PORT")
 MONGO_DB = os.getenv("MONGO_DB")
 
-# --- Construct MongoDB URI ---
+# --- Properly encode username and password ---
+# This is the key change to handle special characters.
+encoded_user = quote_plus(MONGO_USER)
+encoded_password = quote_plus(MONGO_PASSWORD)
+
+# --- Construct MongoDB URI with encoded credentials ---
 MONGO_DETAILS = (
-    f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/"
+    f"mongodb://{encoded_user}:{encoded_password}@{MONGO_HOST}:{MONGO_PORT}/"
     f"{MONGO_DB}?directConnection=true&authSource=admin"
 )
 
@@ -37,12 +33,8 @@ database = client[MONGO_DB]
 users_collection = database.get_collection("users")
 logins_collection = database.get_collection("logins")
 usertypes_collection = database.get_collection("usertypes")
+# --- ADD THIS NEW LINE ---
+packages_collection = database.get_collection("packages")
+
 
 print("MongoDB connection successful!")
-
-
-
-
-
-
-
