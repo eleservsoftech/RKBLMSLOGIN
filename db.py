@@ -1,4 +1,5 @@
 # database.py
+# database.py
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
@@ -33,8 +34,10 @@ database = client[MONGO_DB]
 users_collection = database.get_collection("users")
 logins_collection = database.get_collection("logins")
 usertypes_collection = database.get_collection("usertypes")
-# --- ADD THIS NEW LINE ---
 packages_collection = database.get_collection("packages")
-
+# Courses Collection (Assuming this exists from your previous prompt)
+courses_collection = database.get_collection("courses")
+# --- NEW: Collection for managing package-course bundles ---
+package_bundle_collection = database.get_collection("package_bundles")
 
 print("MongoDB connection successful!")

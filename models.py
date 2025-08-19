@@ -4,18 +4,7 @@
 
 from pydantic import BaseModel, Field, EmailStr
 from datetime import datetime
-from typing import Optional
-from bson import ObjectId
-
-# --- Database Models (Pydantic) ---
-
-# models.py
-# Libraries to install:
-# pip install pydantic "pydantic[email]"
-
-from pydantic import BaseModel, Field, EmailStr
-from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from bson import ObjectId
 
 # --- Database Models (Pydantic) ---
@@ -64,7 +53,7 @@ class LoginModel(BaseModel):
         exclude_none = True
 
 
-# --- New Model for Package Creation ---
+# --- Model for Package Creation ---
 
 class PackageModel(BaseModel):
     id: Optional[str] = Field(alias="_id", default=None)
@@ -76,10 +65,21 @@ class PackageModel(BaseModel):
     is_deleted: bool = Field(default=False, alias="isDeleted")
     created_at: datetime = Field(default_factory=datetime.utcnow, alias="createdAt")
     updated_at: datetime = Field(default_factory=datetime.utcnow, alias="updatedAt")
-    # ✅ NEW: Add the created_by field
-    # created_by: Optional[ObjectId] = Field(default=None, alias="createdBy")
     created_by: Optional[str] = Field(default=None, alias="createdBy")
     updated_by: Optional[ObjectId] = Field(default=None, alias="updated_by")
+
+    class Config:
+        populate_by_name = True
+        arbitrary_types_allowed = True
+        exclude_none = True
+
+# --- NEW: Model for Package Bundles ---
+# This model will link a package to a list of courses.
+class PackageBundleModel(BaseModel):
+    id: Optional[str] = Field(alias="_id", default=None)
+    package_id: str  # String ID of the linked package
+    course_ids: List[str] = []  # List of string IDs of the courses
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Config:
         populate_by_name = True

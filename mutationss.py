@@ -19,16 +19,23 @@ from pydantic import ValidationError
 from strawberry.file_uploads import Upload
 
 # Import the database connection and Pydantic models
-from db import users_collection, logins_collection, usertypes_collection, packages_collection
-from models import UserModel, LoginModel, UserTypeModel, PackageModel
+from db import (
+    users_collection,
+    logins_collection,
+    usertypes_collection,
+    packages_collection,
+    courses_collection,
+    package_bundle_collection
+)
+from models import (
+    UserModel,
+    LoginModel,
+    UserTypeModel,
+    PackageModel,
+    PackageBundleModel
+)
 
 # --- GraphQL Types ---
-
-@strawberry.type
-class UserTypeType:
-    id: str = strawberry.field(name="_id")
-    usertype: str = strawberry.field(name="usertype")
-    created_at: datetime = strawberry.field(name="createdAt")
 
 @strawberry.type
 class UserType:
@@ -39,6 +46,35 @@ class UserType:
     usertype_id: str
     is_active: bool = strawberry.field(name="isActive")
     is_deleted: bool = strawberry.field(name="isDeleted")
+    created_at: datetime = strawberry.field(name="createdAt")
+
+@strawberry.type
+class UserTypeType:
+    id: str = strawberry.field(name="_id")
+    usertype: str = strawberry.field(name="usertype")
+    created_at: datetime = strawberry.field(name="createdAt")
+
+@strawberry.type
+class CourseType:
+    id: str = strawberry.field(name="_id")
+    title: str
+    description: Optional[str] = None
+    thumbnail: Optional[str] = None
+    language: Optional[str] = None
+    desktop_available: bool = strawberry.field(name="desktopAvailable", default=True)
+    created_by: Optional[str] = strawberry.field(name="createdBy")
+    creation_stage: Optional[str] = strawberry.field(name="creationStage")
+    publish_status: Optional[str] = strawberry.field(name="publishStatus")
+    is_deleted: bool = strawberry.field(name="isDeleted", default=False)
+    deleted_by: Optional[str] = strawberry.field(name="deletedBy")
+    deleted_at: Optional[datetime] = strawberry.field(name="deletedAt")
+    created_at: datetime = strawberry.field(name="createdAt")
+
+@strawberry.type
+class PackageBundleType:
+    id: str = strawberry.field(name="_id")
+    package_id: str
+    courses: List[CourseType]
     created_at: datetime = strawberry.field(name="createdAt")
 
 @strawberry.type
@@ -54,6 +90,38 @@ class PackageDetailsType:
     updated_at: datetime = strawberry.field(name="updatedAt")
     created_by: Optional[str] = strawberry.field(name="createdBy")
     updated_by: Optional[str] = strawberry.field(name="updatedBy")
+    
+    @strawberry.field
+    def courses(self) -> List[CourseType]:
+        try:
+            bundle_doc = package_bundle_collection.find_one({"package_id": self.id})
+            if not bundle_doc or not bundle_doc.get("course_ids"):
+                return []
+
+            course_object_ids = [ObjectId(cid) for cid in bundle_doc["course_ids"]]
+            courses_docs = list(courses_collection.find({"_id": {"$in": course_object_ids}}))
+            
+            return [
+                CourseType(
+                    id=str(c["_id"]),
+                    title=c.get("title"),
+                    description=c.get("description"),
+                    thumbnail=c.get("thumbnail"),
+                    language=c.get("language"),
+                    desktop_available=c.get("desktopAvailable", False),
+                    created_by=c.get("created_by"),
+                    creation_stage=c.get("creationStage"),
+                    publish_status=c.get("publishStatus"),
+                    is_deleted=c.get("isDeleted", False),
+                    deleted_by=c.get("deletedBy"),
+                    deleted_at=c.get("deletedAt"),
+                    created_at=c.get("createdAt")
+                ) for c in courses_docs
+            ]
+        except (PyMongoError, ValueError) as e:
+            print(f"Error resolving courses for package {self.id}: {e}")
+            return []
+
 
 @strawberry.input
 class UserInput:
@@ -71,6 +139,11 @@ class PackageInput:
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
 
+@strawberry.input
+class PackageBundleInput:
+    package_id: str
+    course_ids: List[str]
+
 @strawberry.type
 class UserResponse:
     status: int
@@ -82,6 +155,12 @@ class PackageResponse:
     status: int
     message: str
     data: Optional[PackageDetailsType] = None
+
+@strawberry.type
+class PackageBundleResponse:
+    status: int
+    message: str
+    data: Optional[PackageBundleType] = None
 
 
 # --- Helper Functions for File Handling ---
@@ -96,12 +175,10 @@ async def save_and_compress_file(upload: Upload, subfolder: str) -> str:
     os.makedirs(folder_path, exist_ok=True)
     file_path = os.path.join(folder_path, filename)
 
-    # Save the uploaded file temporarily
     content = await upload.read()
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # Compress the image
     image = Image.open(file_path)
     image.save(file_path, optimize=True, quality=60)
 
@@ -113,7 +190,6 @@ def delete_previous_file(file_path: Optional[str]):
     """
     if file_path and os.path.exists(file_path):
         os.remove(file_path)
-
 
 # --- GraphQL Queries ---
 @strawberry.type
@@ -140,7 +216,6 @@ class Query:
 
     @strawberry.field
     def all_user_types(self) -> List[UserTypeType]:
-        
         try:
             usertypes = list(usertypes_collection.find())
             return [
@@ -185,8 +260,8 @@ class Query:
                     description=pkg.get("description"),
                     banner_url=pkg.get("bannerUrl"),
                     theme_url=pkg.get("themeUrl"),
-                    is_active=pkg["isActive"],
-                    is_deleted=pkg["isDeleted"],
+                    is_active=pkg.get("isActive"),
+                    is_deleted=pkg.get("isDeleted"),
                     created_at=pkg["createdAt"],
                     updated_at=pkg["updatedAt"],
                     created_by=pkg.get("createdBy"),
@@ -197,14 +272,46 @@ class Query:
             print(f"MongoDB Error: {e}")
             return []
 
+    @strawberry.field
+    def get_packages(self, created_by: Optional[str] = None) -> List[PackageDetailsType]:
+        try:
+            query_filter = {}
+
+            if created_by:
+                creator_or = [{"createdBy": created_by}]
+                from bson import ObjectId
+                if ObjectId.is_valid(created_by):
+                    creator_or.append({"createdBy": ObjectId(created_by)})
+                query_filter["$or"] = creator_or
+            else:
+                query_filter["isDeleted"] = False
+
+            packages = list(packages_collection.find(query_filter))
+            return [
+                PackageDetailsType(
+                    id=str(pkg["_id"]),
+                    title=pkg.get("title", ""),
+                    description=pkg.get("description"),
+                    banner_url=pkg.get("bannerUrl"),
+                    theme_url=pkg.get("themeUrl"),
+                    is_active=pkg.get("isActive"),
+                    is_deleted=pkg.get("isDeleted"),
+                    created_at=pkg.get("createdAt"),
+                    updated_at=pkg.get("updatedAt"),
+                    created_by=pkg.get("createdBy"),
+                    updated_by=pkg.get("updatedBy")
+                )
+                for pkg in packages
+            ]
+        except PyMongoError as e:
+            print(f"MongoDB Error: {e}")
+            return []
 
 # --- GraphQL Mutations ---
 @strawberry.type
 class Mutation:
-
     @strawberry.mutation
     def signup(self, input: UserInput) -> UserResponse:
-        """Create a new user with a hashed password in MongoDB."""
         try:
             if users_collection.find_one({"email": input.email}):
                 return UserResponse(status=409, message=f"User with email '{input.email}' already exists.")
@@ -254,7 +361,6 @@ class Mutation:
 
     @strawberry.mutation
     def login(self, email: str, password: str) -> UserResponse:
-        """Login a user by verifying their password."""
         try:
             print(f"Attempting to log in with email: {email}")
             user_doc = users_collection.find_one({"email": email, "isDeleted": False})
@@ -295,7 +401,6 @@ class Mutation:
         except Exception as e:
             return UserResponse(status=500, message=f"Unexpected error: {e}")
 
-    #  UPDATED: Mutation to create a new package with file uploads
     @strawberry.mutation
     async def create_package(
         self,
@@ -305,23 +410,17 @@ class Mutation:
         theme_file: Optional[Upload] = None,
         created_by: Optional[str] = None
     ) -> PackageResponse:
-        """
-        Creates a new package, handling file uploads, compression, and database insertion.
-        """
         try:
             banner_url = None
             theme_url = None
 
-            # Handle file uploads if provided
             if banner_file:
                 banner_url = await save_and_compress_file(banner_file, "banners")
-                print('banner_url:',banner_url)
-
+                print('banner_url:', banner_url)
 
             if theme_file:
                 theme_url = await save_and_compress_file(theme_file, "themes")
 
-            # Validate the input using the Pydantic model
             new_package_data = PackageModel(
                 title=title,
                 description=description,
@@ -343,8 +442,6 @@ class Mutation:
                     id=str(insert_result.inserted_id),
                     title=new_package_data.title,
                     description=new_package_data.description,
-                    # banner_url=new_package_data.bannerUrl,
-                    # theme_url=new_package_data.themeUrl,
                     banner_url=new_package_data.banner_url,
                     theme_url=new_package_data.theme_url,
                     is_active=new_package_data.is_active,
@@ -356,16 +453,18 @@ class Mutation:
                 )
             )
         except (PyMongoError, ValidationError) as e:
-            # Clean up uploaded files if an error occurs
-            if banner_url: delete_previous_file(banner_url.lstrip('/'))
-            if theme_url: delete_previous_file(theme_url.lstrip('/'))
+            if banner_url:
+                delete_previous_file(banner_url.lstrip('/'))
+            if theme_url:
+                delete_previous_file(theme_url.lstrip('/'))
             return PackageResponse(status=500, message=f"An error occurred: {e}")
         except Exception as e:
-            if banner_url: delete_previous_file(banner_url.lstrip('/'))
-            if theme_url: delete_previous_file(theme_url.lstrip('/'))
+            if banner_url:
+                delete_previous_file(banner_url.lstrip('/'))
+            if theme_url:
+                delete_previous_file(theme_url.lstrip('/'))
             return PackageResponse(status=500, message=f"An unexpected error occurred: {e}")
 
-    # ✅ UPDATED: Mutation to update an existing package with file uploads
     @strawberry.mutation
     async def update_package(
         self,
@@ -376,10 +475,6 @@ class Mutation:
         theme_file: Optional[Upload] = None,
         updated_by: Optional[str] = None
     ) -> PackageResponse:
-        """
-        Updates an existing package, handles file uploads, deletes previous files,
-        and updates the database.
-        """
         try:
             existing_package_doc = packages_collection.find_one({"_id": ObjectId(package_id)})
             if not existing_package_doc:
@@ -389,18 +484,13 @@ class Mutation:
             current_banner_url = existing_package_doc.get("bannerUrl")
             current_theme_url = existing_package_doc.get("themeUrl")
 
-            # Handle banner file update
             if banner_file:
-                # Delete old file
                 if current_banner_url:
                     delete_previous_file(current_banner_url.lstrip('/'))
-                # Save new file
                 update_data["bannerUrl"] = await save_and_compress_file(banner_file, "banners")
             else:
-                # If no new file, but there was a file, we keep the existing one
                 update_data["bannerUrl"] = current_banner_url
 
-            # Handle theme file update
             if theme_file:
                 if current_theme_url:
                     delete_previous_file(current_theme_url.lstrip('/'))
@@ -408,7 +498,6 @@ class Mutation:
             else:
                 update_data["themeUrl"] = current_theme_url
 
-            # Update other fields if provided
             if title is not None:
                 update_data["title"] = title
             if description is not None:
@@ -447,6 +536,181 @@ class Mutation:
 
         except (PyMongoError, ValueError) as e:
             return PackageResponse(status=500, message=f"An error occurred: {e}")
+        
+    ### To get the all packages of the users
+    @strawberry.mutation
+    def get_packages(self, created_by: Optional[str] = None) -> List[PackageDetailsType]:
+        """
+        Fetch packages:
+        - If created_by is not provided → only active (isDeleted = False) packages.
+        - If created_by is provided → all packages for that user, regardless of isDeleted status.
+        """
+        try:
+            query_filter = {}
+
+            if created_by:
+                # Match both string and ObjectId versions
+                creator_or = [{"createdBy": created_by}]
+                from bson import ObjectId
+                if ObjectId.is_valid(created_by):
+                    creator_or.append({"createdBy": ObjectId(created_by)})
+                query_filter["$or"] = creator_or
+            else:
+                # Only non-deleted packages if no creator filter
+                query_filter["isDeleted"] = False
+
+            packages = list(packages_collection.find(query_filter))
+            return [
+                PackageDetailsType(
+                    id=str(pkg["_id"]),
+                    title=pkg.get("title", ""),
+                    description=pkg.get("description"),
+                    banner_url=pkg.get("bannerUrl"),
+                    theme_url=pkg.get("themeUrl"),
+                    is_active=pkg.get("isActive"),
+                    is_deleted=pkg.get("isDeleted"),
+                    created_at=pkg.get("createdAt"),
+                    updated_at=pkg.get("updatedAt"),
+                    created_by=pkg.get("createdBy"),
+                    updated_by=pkg.get("updatedBy")
+                )
+                for pkg in packages
+            ]
+        except PyMongoError as e:
+            print(f"MongoDB Error: {e}")
+            return []
+
+    @strawberry.mutation
+    def create_package_bundle(self, input: PackageBundleInput) -> PackageBundleResponse:
+        """
+        Creates a new package bundle, linking a package to a list of courses.
+        """
+        try:
+            if not packages_collection.find_one({"_id": ObjectId(input.package_id)}):
+                return PackageBundleResponse(status=404, message="Parent package not found.")
+            
+            if package_bundle_collection.find_one({"package_id": input.package_id}):
+                return PackageBundleResponse(
+                    status=409, 
+                    message=f"Bundle for package '{input.package_id}' already exists. Use update_package_bundle instead."
+                )
+
+            course_object_ids = [ObjectId(cid) for cid in input.course_ids]
+            if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(input.course_ids):
+                return PackageBundleResponse(status=404, message="One or more course IDs not found.")
+
+            new_bundle_data = PackageBundleModel(
+                package_id=input.package_id,
+                course_ids=input.course_ids
+            )
+            
+            bundle_dict = new_bundle_data.model_dump(by_alias=True)
+            if bundle_dict.get('_id') is None:
+                del bundle_dict['_id']
+
+            insert_result = package_bundle_collection.insert_one(bundle_dict)
+
+            courses_docs = list(courses_collection.find({"_id": {"$in": course_object_ids}}))
+            resolved_courses = [
+                CourseType(
+                    id=str(c["_id"]),
+                    title=c.get("title"),
+                    description=c.get("description"),
+                    thumbnail=c.get("thumbnail"),
+                    language=c.get("language"),
+                    desktop_available=c.get("desktopAvailable", False),
+                    created_by=c.get("created_by"),
+                    creation_stage=c.get("creationStage"),
+                    publish_status=c.get("publishStatus"),
+                    is_deleted=c.get("isDeleted"),
+                    deleted_by=c.get("deletedBy"),
+                    deleted_at=c.get("deletedAt"),
+                    created_at=c.get("createdAt")
+                ) for c in courses_docs
+            ]
+
+            return PackageBundleResponse(
+                status=200,
+                message="Package bundle created successfully.",
+                data=PackageBundleType(
+                    id=str(insert_result.inserted_id),
+                    package_id=new_bundle_data.package_id,
+                    courses=resolved_courses,
+                    created_at=new_bundle_data.created_at
+                )
+            )
+
+        except (PyMongoError, ValueError) as e:
+            return PackageBundleResponse(status=500, message=f"An error occurred: {e}")
+        except Exception as e:
+            return PackageBundleResponse(status=500, message=f"An unexpected error occurred: {e}")
+
+    @strawberry.mutation
+    def update_package_bundle(self, bundle_id: str, course_ids: List[str]) -> PackageBundleResponse:
+        """
+        Updates an existing package bundle with a new list of courses.
+        """
+        try:
+            existing_bundle_doc = package_bundle_collection.find_one({"_id": ObjectId(bundle_id)})
+            if not existing_bundle_doc:
+                return PackageBundleResponse(status=404, message="Package bundle not found.")
+
+            course_object_ids = [ObjectId(cid) for cid in course_ids]
+            if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(course_ids):
+                return PackageBundleResponse(status=404, message="One or more course IDs not found.")
+            
+            update_result = package_bundle_collection.update_one(
+                {"_id": ObjectId(bundle_id)},
+                {"$set": {"course_ids": course_ids}}
+            )
+
+            if update_result.modified_count == 1:
+                updated_bundle_doc = package_bundle_collection.find_one({"_id": ObjectId(bundle_id)})
+                
+                resolved_courses = [
+                    CourseType(
+                        id=str(c["_id"]),
+                        title=c.get("title"),
+                        description=c.get("description"),
+                        thumbnail=c.get("thumbnail"),
+                        language=c.get("language"),
+                        desktop_available=c.get("desktopAvailable", False),
+                        created_by=c.get("created_by"),
+                        creation_stage=c.get("creationStage"),
+                        publish_status=c.get("publishStatus"),
+                        is_deleted=c.get("isDeleted"),
+                        deleted_by=c.get("deletedBy"),
+                        deleted_at=c.get("deletedAt"),
+                        created_at=c.get("createdAt")
+                    ) for c in courses_collection.find({"_id": {"$in": course_object_ids}})
+                ]
+
+                return PackageBundleResponse(
+                    status=200,
+                    message="Package bundle updated successfully.",
+                    data=PackageBundleType(
+                        id=str(updated_bundle_doc["_id"]),
+                        package_id=updated_bundle_doc["package_id"],
+                        courses=resolved_courses,
+                        created_at=updated_bundle_doc["created_at"]
+                    )
+                )
+            else:
+                return PackageBundleResponse(status=500, message="Failed to update package bundle.")
+        except (PyMongoError, ValueError) as e:
+            return PackageBundleResponse(status=500, message=f"An error occurred: {e}")
+
+    @strawberry.mutation
+    def delete_package_bundle(self, bundle_id: str) -> PackageBundleResponse:
+        """Deletes a package bundle by its ID."""
+        try:
+            delete_result = package_bundle_collection.delete_one({"_id": ObjectId(bundle_id)})
+            if delete_result.deleted_count == 1:
+                return PackageBundleResponse(status=200, message="Package bundle deleted successfully.")
+            else:
+                return PackageBundleResponse(status=404, message="Package bundle not found.")
+        except (PyMongoError, ValueError) as e:
+            return PackageBundleResponse(status=500, message=f"An error occurred: {e}")
 
 # Create the schema
 schema = strawberry.Schema(query=Query, mutation=Mutation)
