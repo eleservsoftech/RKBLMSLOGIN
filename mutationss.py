@@ -1,10 +1,3 @@
-
-#mongodb code 
-
-# mutations.py
-# Libraries to install:
-# pip install strawberry-graphql-fastapi bcrypt pymongo "pydantic[email]"
-
 import bcrypt
 import strawberry
 import base64
@@ -17,7 +10,15 @@ from bson import ObjectId
 from pymongo.errors import PyMongoError
 from pydantic import ValidationError
 from strawberry.file_uploads import Upload
-
+from dotenv import load_dotenv
+import jwt  # <-- Add this
+from datetime import datetime, timedelta # <-- Add timedelta
+# --- JWT Configuration ---
+# JWT_SECRET = "ImRakeshBansalVentures@RKB@2025"  # <-- Your secret key
+# TOKEN_EXPIRATION_MINUTES = 60 # <-- Token expiration time
+load_dotenv()
+JWT_SECRET = os.getenv("JWT_SECRET")
+# ... (rest of your code)
 # Import the database connection and Pydantic models
 from db import (
     users_collection,
@@ -44,6 +45,7 @@ class UserType:
     email: str
     phone: str
     usertype_id: str
+    usertype:str
     is_active: bool = strawberry.field(name="isActive")
     is_deleted: bool = strawberry.field(name="isDeleted")
     created_at: datetime = strawberry.field(name="createdAt")
@@ -90,6 +92,8 @@ class PackageDetailsType:
     updated_at: datetime = strawberry.field(name="updatedAt")
     created_by: Optional[str] = strawberry.field(name="createdBy")
     updated_by: Optional[str] = strawberry.field(name="updatedBy")
+    # NEW: Add a price field to the GraphQL type
+    price: Optional[float] = None
     
     @strawberry.field
     def courses(self) -> List[CourseType]:
@@ -143,12 +147,15 @@ class PackageInput:
 class PackageBundleInput:
     package_id: str
     course_ids: List[str]
+    # NEW: Made the price field optional
+    price: Optional[float] = None
 
 @strawberry.type
 class UserResponse:
     status: int
     message: str
     data: Optional[UserType] = None
+    token: Optional[str] = None  # <-- Add this field
 
 @strawberry.type
 class PackageResponse:
@@ -265,7 +272,9 @@ class Query:
                     created_at=pkg["createdAt"],
                     updated_at=pkg["updatedAt"],
                     created_by=pkg.get("createdBy"),
-                    updated_by=pkg.get("updatedBy")
+                    updated_by=pkg.get("updatedBy"),
+                    # NEW: Include the price in the response
+                    price=pkg.get("price", 0.0)
                 ) for pkg in packages
             ]
         except PyMongoError as e:
@@ -299,7 +308,9 @@ class Query:
                     created_at=pkg.get("createdAt"),
                     updated_at=pkg.get("updatedAt"),
                     created_by=pkg.get("createdBy"),
-                    updated_by=pkg.get("updatedBy")
+                    updated_by=pkg.get("updatedBy"),
+                    # NEW: Include the price in the response
+                    price=pkg.get("price", 0.0)
                 )
                 for pkg in packages
             ]
@@ -313,18 +324,22 @@ class Mutation:
     @strawberry.mutation
     def signup(self, input: UserInput) -> UserResponse:
         try:
+            # Check for existing user by email or phone
             if users_collection.find_one({"email": input.email}):
                 return UserResponse(status=409, message=f"User with email '{input.email}' already exists.")
 
             if users_collection.find_one({"phone": input.phone}):
                 return UserResponse(status=409, message=f"User with phone '{input.phone}' already exists.")
 
+            # Find the default user type
             default_usertype = usertypes_collection.find_one({"usertype": "user"})
             if not default_usertype:
                 return UserResponse(status=404, message="Default 'user' usertype not found.")
 
+            # Hash the password
             hashed_password = bcrypt.hashpw(input.password.encode('utf-8'), bcrypt.gensalt())
 
+            # Create user data and insert into the database
             new_user_data = UserModel(
                 name=input.name,
                 email=input.email,
@@ -340,20 +355,43 @@ class Mutation:
                 del user_dict['_id']
 
             insert_result = users_collection.insert_one(user_dict)
+            new_user_id = insert_result.inserted_id
+
+            # --- NEW: Generate JWT Token and Store in Login Table ---
+            # 1. Define the JWT payload
+            payload = {
+                "id": str(new_user_id),
+                "name": new_user_data.name,
+                "email": new_user_data.email,
+                "phone":new_user_data.phone,
+                "usertype":new_user_data.usertype,
+                "jti": str(uuid.uuid4()) # <-- Recommended: Unique token ID for each generation
+                # "exp": datetime.utcnow() + timedelta(minutes=60)  # Token valid for 60 minutes
+            }
+            
+            # 2. Encode the payload to create the token
+            token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+            # 3. Create and insert the login entry with the generated token
+            login_entry_data = LoginModel(user_id=new_user_id, token=token)
+            logins_collection.insert_one(login_entry_data.model_dump(by_alias=True, exclude_none=True))
+            # --- END OF NEW LOGIC ---
 
             return UserResponse(
                 status=200,
                 message="Signup successful",
                 data=UserType(
-                    id=str(insert_result.inserted_id),
+                    id=str(new_user_id),
                     name=new_user_data.name,
                     email=new_user_data.email,
                     phone=new_user_data.phone,
                     usertype_id=str(new_user_data.usertype_id),
+                    usertype="user",
                     is_active=new_user_data.is_active,
                     is_deleted=new_user_data.is_deleted,
                     created_at=new_user_data.created_at
-                )
+                ),
+                token=token  # <-- Return the generated token to the client
             )
 
         except (PyMongoError, ValidationError) as e:
@@ -365,36 +403,55 @@ class Mutation:
             print(f"Attempting to log in with email: {email}")
             user_doc = users_collection.find_one({"email": email, "isDeleted": False})
 
+            if not user_doc:
+                return UserResponse(status=404, message="User not found or is deleted.")
+
+            # Check the password
+            if not bcrypt.checkpw(password.encode('utf-8'), user_doc["password"].encode('utf-8')):
+                return UserResponse(status=401, message="Incorrect email or password.")
+            
+            usertype_doc = usertypes_collection.find_one({"_id": ObjectId(user_doc["usertype_id"])})
             print(f"User document found: {user_doc}")
 
-            if user_doc:
-                if bcrypt.checkpw(password.encode('utf-8'), user_doc["password"].encode('utf-8')):
-                    print(f"User '{user_doc['email']}' logged in successfully.")
+            print(f"User '{user_doc['email']}' logged in successfully.")
 
-                    login_entry_data = LoginModel(user_id=user_doc["_id"])
-                    login_dict = login_entry_data.model_dump(by_alias=True)
-                    if login_dict.get('_id') is None:
-                        del login_dict['_id']
-                    logins_collection.insert_one(login_dict)
+            # --- NEW: Generate a new JWT token for the session ---
+            payload = {
+                "id": str(user_doc["_id"]),
+                "name": user_doc["name"],
+                "email": user_doc["email"],
+                "phone": user_doc["phone"],
+                "usertype": usertype_doc["usertype"] if usertype_doc else None,
+                "jti": str(uuid.uuid4()) # <-- Recommended: Unique token ID for each generation
+                # "exp": datetime.utcnow() + timedelta(minutes=60)  # Token valid for 60 minutes
+            }
+            token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-                    return UserResponse(
-                        status=200,
-                        message="Login successful",
-                        data=UserType(
-                            id=str(user_doc["_id"]),
-                            name=user_doc["name"],
-                            email=user_doc["email"],
-                            phone=user_doc["phone"],
-                            usertype_id=str(user_doc["usertype_id"]),
-                            is_active=user_doc["isActive"],
-                            is_deleted=user_doc["isDeleted"],
-                            created_at=user_doc["created_at"]
-                        )
-                    )
-                else:
-                    return UserResponse(status=401, message="Incorrect email or password.")
-            else:
-                return UserResponse(status=404, message="User not found or is deleted.")
+            # --- NEW: Store/Update the token in the logins table ---
+            # The upsert=True flag will create a new login document if one for the user_id doesn't exist,
+            # or update the existing one if it does.
+            logins_collection.update_one(
+                {"user_id": user_doc["_id"]},
+                {"$set": {"token": token, "created_at": datetime.utcnow()}},
+                upsert=True
+            )
+
+            return UserResponse(
+                status=200,
+                message="Login successful",
+                data=UserType(
+                    id=str(user_doc["_id"]),
+                    name=user_doc["name"],
+                    email=user_doc["email"],
+                    phone=user_doc["phone"],
+                    usertype_id=str(user_doc["usertype_id"]),
+                    usertype=usertype_doc["usertype"] if usertype_doc else None,
+                    is_active=user_doc.get("is_active", True),
+                    is_deleted=user_doc.get("is_deleted", False),
+                    created_at=user_doc["created_at"]
+                ),
+                token=token  # <-- Return the new token
+            )
 
         except PyMongoError as e:
             return UserResponse(status=500, message=f"Database error: {e}")
@@ -572,7 +629,9 @@ class Mutation:
                     created_at=pkg.get("createdAt"),
                     updated_at=pkg.get("updatedAt"),
                     created_by=pkg.get("createdBy"),
-                    updated_by=pkg.get("updatedBy")
+                    updated_by=pkg.get("updatedBy"),
+                    # NEW: Include the price in the response
+                    price=pkg.get("price", 0.0)
                 )
                 for pkg in packages
             ]
@@ -598,6 +657,13 @@ class Mutation:
             course_object_ids = [ObjectId(cid) for cid in input.course_ids]
             if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(input.course_ids):
                 return PackageBundleResponse(status=404, message="One or more course IDs not found.")
+
+            # NEW: Update the parent package with the price only if a price is provided
+            if input.price is not None:
+                packages_collection.update_one(
+                    {"_id": ObjectId(input.package_id)},
+                    {"$set": {"price": input.price}}
+                )
 
             new_bundle_data = PackageBundleModel(
                 package_id=input.package_id,
@@ -646,9 +712,9 @@ class Mutation:
             return PackageBundleResponse(status=500, message=f"An unexpected error occurred: {e}")
 
     @strawberry.mutation
-    def update_package_bundle(self, bundle_id: str, course_ids: List[str]) -> PackageBundleResponse:
+    def update_package_bundle(self, bundle_id: str, course_ids: List[str], price: Optional[float] = None) -> PackageBundleResponse:
         """
-        Updates an existing package bundle with a new list of courses.
+        Updates an existing package bundle with a new list of courses and an optional new price.
         """
         try:
             existing_bundle_doc = package_bundle_collection.find_one({"_id": ObjectId(bundle_id)})
@@ -658,7 +724,14 @@ class Mutation:
             course_object_ids = [ObjectId(cid) for cid in course_ids]
             if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(course_ids):
                 return PackageBundleResponse(status=404, message="One or more course IDs not found.")
-            
+
+            # NEW: Update the parent package with the price if it's provided
+            if price is not None:
+                packages_collection.update_one(
+                    {"_id": ObjectId(existing_bundle_doc["package_id"])},
+                    {"$set": {"price": price}}
+                )
+
             update_result = package_bundle_collection.update_one(
                 {"_id": ObjectId(bundle_id)},
                 {"$set": {"course_ids": course_ids}}
