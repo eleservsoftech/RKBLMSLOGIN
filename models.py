@@ -79,7 +79,10 @@ class PackageModel(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow, alias="createdAt")
     updated_at: datetime = Field(default_factory=datetime.utcnow, alias="updatedAt")
     created_by: Optional[str] = Field(default=None, alias="createdBy")
-    updated_by: Optional[ObjectId] = Field(default=None, alias="updated_by")
+    updated_by: Optional[str] = Field(default=None, alias="updatedBy")
+    course_ids: Optional[List[str]] = Field(default_factory=list, alias="course_ids")
+    price: Optional[float] = None
+    telegram_id: Optional[List[str]] = Field(default=None) # Updated to List[str]
 
     class Config:
         populate_by_name = True

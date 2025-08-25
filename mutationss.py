@@ -5,20 +5,17 @@ import uuid
 import os
 from PIL import Image
 from typing import List, Optional, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
 from pymongo.errors import PyMongoError
 from pydantic import ValidationError
 from strawberry.file_uploads import Upload
 from dotenv import load_dotenv
-import jwt  # <-- Add this
-from datetime import datetime, timedelta # <-- Add timedelta
-# --- JWT Configuration ---
-# JWT_SECRET = "ImRakeshBansalVentures@RKB@2025"  # <-- Your secret key
-# TOKEN_EXPIRATION_MINUTES = 60 # <-- Token expiration time
+import jwt
+
 load_dotenv()
 JWT_SECRET = os.getenv("JWT_SECRET")
-# ... (rest of your code)
+
 # Import the database connection and Pydantic models
 from db import (
     users_collection,
@@ -35,6 +32,10 @@ from models import (
     PackageModel,
     PackageBundleModel
 )
+
+# ----------------- AUTHENTICATION CODE (COMMENTED FOR DEVELOPMENT) -----------------
+from authenticate import AuthenticatedUser
+# -----------------------------------------------------------------------------------
 
 # --- GraphQL Types ---
 
@@ -92,39 +93,38 @@ class PackageDetailsType:
     updated_at: datetime = strawberry.field(name="updatedAt")
     created_by: Optional[str] = strawberry.field(name="createdBy")
     updated_by: Optional[str] = strawberry.field(name="updatedBy")
-    # NEW: Add a price field to the GraphQL type
     price: Optional[float] = None
+    course_ids: Optional[List[str]] = None  # Add this field
+    telegram_id: Optional[List[str]] = None # Updated to List[str]
     
-    @strawberry.field
-    def courses(self) -> List[CourseType]:
-        try:
-            bundle_doc = package_bundle_collection.find_one({"package_id": self.id})
-            if not bundle_doc or not bundle_doc.get("course_ids"):
-                return []
-
-            course_object_ids = [ObjectId(cid) for cid in bundle_doc["course_ids"]]
-            courses_docs = list(courses_collection.find({"_id": {"$in": course_object_ids}}))
-            
-            return [
-                CourseType(
-                    id=str(c["_id"]),
-                    title=c.get("title"),
-                    description=c.get("description"),
-                    thumbnail=c.get("thumbnail"),
-                    language=c.get("language"),
-                    desktop_available=c.get("desktopAvailable", False),
-                    created_by=c.get("created_by"),
-                    creation_stage=c.get("creationStage"),
-                    publish_status=c.get("publishStatus"),
-                    is_deleted=c.get("isDeleted", False),
-                    deleted_by=c.get("deletedBy"),
-                    deleted_at=c.get("deletedAt"),
-                    created_at=c.get("createdAt")
-                ) for c in courses_docs
-            ]
-        except (PyMongoError, ValueError) as e:
-            print(f"Error resolving courses for package {self.id}: {e}")
-            return []
+    # @strawberry.field
+    # def courses(self) -> List[CourseType]:
+    #     try:
+    #         bundle_doc = package_bundle_collection.find_one({"package_id": self.id})
+    #         if not bundle_doc or not bundle_doc.get("course_ids"):
+    #             return []
+    #         course_object_ids = [ObjectId(cid) for cid in bundle_doc["course_ids"]]
+    #         courses_docs = list(courses_collection.find({"_id": {"$in": course_object_ids}}))
+    #         return [
+    #             CourseType(
+    #                 id=str(c["_id"]),
+    #                 title=c.get("title"),
+    #                 description=c.get("description"),
+    #                 thumbnail=c.get("thumbnail"),
+    #                 language=c.get("language"),
+    #                 desktop_available=c.get("desktopAvailable", False),
+    #                 created_by=c.get("created_by"),
+    #                 creation_stage=c.get("creationStage"),
+    #                 publish_status=c.get("publishStatus"),
+    #                 is_deleted=c.get("isDeleted", False),
+    #                 deleted_by=c.get("deletedBy"),
+    #                 deleted_at=c.get("deletedAt"),
+    #                 created_at=c.get("createdAt")
+    #             ) for c in courses_docs
+    #         ]
+    #     except (PyMongoError, ValueError) as e:
+    #         print(f"Error resolving courses for package {self.id}: {e}")
+    #         return []
 
 
 @strawberry.input
@@ -147,7 +147,6 @@ class PackageInput:
 class PackageBundleInput:
     package_id: str
     course_ids: List[str]
-    # NEW: Made the price field optional
     price: Optional[float] = None
 
 @strawberry.type
@@ -155,7 +154,7 @@ class UserResponse:
     status: int
     message: str
     data: Optional[UserType] = None
-    token: Optional[str] = None  # <-- Add this field
+    token: Optional[str] = None
 
 @strawberry.type
 class PackageResponse:
@@ -168,7 +167,6 @@ class PackageBundleResponse:
     status: int
     message: str
     data: Optional[PackageBundleType] = None
-
 
 # --- Helper Functions for File Handling ---
 
@@ -273,7 +271,6 @@ class Query:
                     updated_at=pkg["updatedAt"],
                     created_by=pkg.get("createdBy"),
                     updated_by=pkg.get("updatedBy"),
-                    # NEW: Include the price in the response
                     price=pkg.get("price", 0.0)
                 ) for pkg in packages
             ]
@@ -285,10 +282,8 @@ class Query:
     def get_packages(self, created_by: Optional[str] = None) -> List[PackageDetailsType]:
         try:
             query_filter = {}
-
             if created_by:
                 creator_or = [{"createdBy": created_by}]
-                from bson import ObjectId
                 if ObjectId.is_valid(created_by):
                     creator_or.append({"createdBy": ObjectId(created_by)})
                 query_filter["$or"] = creator_or
@@ -296,6 +291,10 @@ class Query:
                 query_filter["isDeleted"] = False
 
             packages = list(packages_collection.find(query_filter))
+            
+            if not packages:
+                return []
+
             return [
                 PackageDetailsType(
                     id=str(pkg["_id"]),
@@ -309,13 +308,17 @@ class Query:
                     updated_at=pkg.get("updatedAt"),
                     created_by=pkg.get("createdBy"),
                     updated_by=pkg.get("updatedBy"),
-                    # NEW: Include the price in the response
-                    price=pkg.get("price", 0.0)
+                    price=pkg.get("price", 0.0),
+                    course_ids=pkg.get("course_ids", []),
+                    telegram_id=[pkg.get("telegram_id")] if isinstance(pkg.get("telegram_id"), str) else pkg.get("telegram_id", []),
                 )
                 for pkg in packages
             ]
         except PyMongoError as e:
             print(f"MongoDB Error: {e}")
+            return []
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
             return []
 
 # --- GraphQL Mutations ---
@@ -324,22 +327,14 @@ class Mutation:
     @strawberry.mutation
     def signup(self, input: UserInput) -> UserResponse:
         try:
-            # Check for existing user by email or phone
             if users_collection.find_one({"email": input.email}):
                 return UserResponse(status=409, message=f"User with email '{input.email}' already exists.")
-
             if users_collection.find_one({"phone": input.phone}):
                 return UserResponse(status=409, message=f"User with phone '{input.phone}' already exists.")
-
-            # Find the default user type
             default_usertype = usertypes_collection.find_one({"usertype": "user"})
             if not default_usertype:
                 return UserResponse(status=404, message="Default 'user' usertype not found.")
-
-            # Hash the password
             hashed_password = bcrypt.hashpw(input.password.encode('utf-8'), bcrypt.gensalt())
-
-            # Create user data and insert into the database
             new_user_data = UserModel(
                 name=input.name,
                 email=input.email,
@@ -349,34 +344,22 @@ class Mutation:
                 is_active=True,
                 is_deleted=False
             )
-
             user_dict = new_user_data.model_dump(by_alias=True)
             if user_dict.get('_id') is None:
                 del user_dict['_id']
-
             insert_result = users_collection.insert_one(user_dict)
             new_user_id = insert_result.inserted_id
-
-            # --- NEW: Generate JWT Token and Store in Login Table ---
-            # 1. Define the JWT payload
             payload = {
                 "id": str(new_user_id),
                 "name": new_user_data.name,
                 "email": new_user_data.email,
                 "phone":new_user_data.phone,
-                "usertype":new_user_data.usertype,
-                "jti": str(uuid.uuid4()) # <-- Recommended: Unique token ID for each generation
-                # "exp": datetime.utcnow() + timedelta(minutes=60)  # Token valid for 60 minutes
+                "usertype": "user",
+                "jti": str(uuid.uuid4())
             }
-            
-            # 2. Encode the payload to create the token
             token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-            # 3. Create and insert the login entry with the generated token
             login_entry_data = LoginModel(user_id=new_user_id, token=token)
             logins_collection.insert_one(login_entry_data.model_dump(by_alias=True, exclude_none=True))
-            # --- END OF NEW LOGIC ---
-
             return UserResponse(
                 status=200,
                 message="Signup successful",
@@ -391,9 +374,8 @@ class Mutation:
                     is_deleted=new_user_data.is_deleted,
                     created_at=new_user_data.created_at
                 ),
-                token=token  # <-- Return the generated token to the client
+                token=token
             )
-
         except (PyMongoError, ValidationError) as e:
             return UserResponse(status=500, message=f"An unexpected error occurred: {e}")
 
@@ -402,40 +384,27 @@ class Mutation:
         try:
             print(f"Attempting to log in with email: {email}")
             user_doc = users_collection.find_one({"email": email, "isDeleted": False})
-
             if not user_doc:
                 return UserResponse(status=404, message="User not found or is deleted.")
-
-            # Check the password
             if not bcrypt.checkpw(password.encode('utf-8'), user_doc["password"].encode('utf-8')):
                 return UserResponse(status=401, message="Incorrect email or password.")
-            
             usertype_doc = usertypes_collection.find_one({"_id": ObjectId(user_doc["usertype_id"])})
             print(f"User document found: {user_doc}")
-
             print(f"User '{user_doc['email']}' logged in successfully.")
-
-            # --- NEW: Generate a new JWT token for the session ---
             payload = {
                 "id": str(user_doc["_id"]),
                 "name": user_doc["name"],
                 "email": user_doc["email"],
                 "phone": user_doc["phone"],
                 "usertype": usertype_doc["usertype"] if usertype_doc else None,
-                "jti": str(uuid.uuid4()) # <-- Recommended: Unique token ID for each generation
-                # "exp": datetime.utcnow() + timedelta(minutes=60)  # Token valid for 60 minutes
+                "jti": str(uuid.uuid4())
             }
             token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-            # --- NEW: Store/Update the token in the logins table ---
-            # The upsert=True flag will create a new login document if one for the user_id doesn't exist,
-            # or update the existing one if it does.
             logins_collection.update_one(
                 {"user_id": user_doc["_id"]},
                 {"$set": {"token": token, "created_at": datetime.utcnow()}},
                 upsert=True
             )
-
             return UserResponse(
                 status=200,
                 message="Login successful",
@@ -450,40 +419,65 @@ class Mutation:
                     is_deleted=user_doc.get("is_deleted", False),
                     created_at=user_doc["created_at"]
                 ),
-                token=token  # <-- Return the new token
+                token=token
             )
-
         except PyMongoError as e:
             return UserResponse(status=500, message=f"Database error: {e}")
         except Exception as e:
             return UserResponse(status=500, message=f"Unexpected error: {e}")
 
+
+
     @strawberry.mutation
     async def create_package(
         self,
+        info: strawberry.Info,
         title: str,
-        description: Optional[str] = None,
-        banner_file: Optional[Upload] = None,
-        theme_file: Optional[Upload] = None,
-        created_by: Optional[str] = None
+        description: str,
+        banner_file: Upload,
+        theme_file: Upload,
+        course_ids: List[str],
+        price: float,
+        telegram_id: Optional[List[str]] = None  # Updated to List[str]
     ) -> PackageResponse:
         try:
+            # ----------------- AUTHENTICATION CHECK (COMMENTED FOR DEVELOPMENT) -----------------
+            current_user: Optional[AuthenticatedUser] = info.context.get("current_user")
+            if not current_user:
+                return PackageResponse(status=401, message="Authentication required: You must be logged in.")
+            created_by_id = current_user.id
+            # ------------------------------------------------------------------------------------
+            
+            # ----------------- DEVELOPMENT PLACEHOLDER (UNCOMMENTED) -----------------
+            # created_by_id = "development_user"
+            # -------------------------------------------------------------------------
+            
+            # Check if a package with the same title already exists
+            if packages_collection.find_one({"title": title, "isDeleted": False}):
+                return PackageResponse(status=409, message=f"Package with title '{title}' already exists.")
+
             banner_url = None
             theme_url = None
 
-            if banner_file:
-                banner_url = await save_and_compress_file(banner_file, "banners")
-                print('banner_url:', banner_url)
+            # Save files
+            banner_url = await save_and_compress_file(banner_file, "banners")
+            theme_url = await save_and_compress_file(theme_file, "themes")
 
-            if theme_file:
-                theme_url = await save_and_compress_file(theme_file, "themes")
+            # Validate course IDs
+            course_object_ids = [ObjectId(cid) for cid in course_ids]
+            if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(course_ids):
+                return PackageResponse(status=404, message="One or more course IDs not found.")
 
+            # Create new package data
             new_package_data = PackageModel(
                 title=title,
                 description=description,
                 bannerUrl=banner_url,
                 themeUrl=theme_url,
-                createdBy=created_by
+                createdBy=created_by_id,
+                course_ids=course_ids,
+                price=price,
+                telegram_id=telegram_id
             )
             
             package_dict = new_package_data.model_dump(by_alias=True)
@@ -492,21 +486,27 @@ class Mutation:
 
             insert_result = packages_collection.insert_one(package_dict)
 
+            # Fetch the newly created package to ensure accurate response data
+            new_package_doc = packages_collection.find_one({"_id": insert_result.inserted_id})
+
             return PackageResponse(
                 status=200,
                 message="Package created successfully.",
                 data=PackageDetailsType(
-                    id=str(insert_result.inserted_id),
-                    title=new_package_data.title,
-                    description=new_package_data.description,
-                    banner_url=new_package_data.banner_url,
-                    theme_url=new_package_data.theme_url,
-                    is_active=new_package_data.is_active,
-                    is_deleted=new_package_data.is_deleted,
-                    created_at=new_package_data.created_at,
-                    updated_at=new_package_data.updated_at,
-                    created_by=new_package_data.created_by,
-                    updated_by=new_package_data.updated_by
+                    id=str(new_package_doc["_id"]),
+                    title=new_package_doc.get("title"),
+                    description=new_package_doc.get("description"),
+                    banner_url=new_package_doc.get("bannerUrl"),
+                    theme_url=new_package_doc.get("themeUrl"),
+                    is_active=new_package_doc.get("isActive"),
+                    is_deleted=new_package_doc.get("isDeleted"),
+                    created_at=new_package_doc.get("createdAt"),
+                    updated_at=new_package_doc.get("updatedAt"),
+                    created_by=new_package_doc.get("createdBy"),
+                    updated_by=new_package_doc.get("updatedBy"),
+                    course_ids=new_package_doc.get("course_ids"),
+                    price=new_package_doc.get("price", 0.0),
+                    telegram_id=new_package_doc.get("telegram_id")
                 )
             )
         except (PyMongoError, ValidationError) as e:
@@ -516,26 +516,48 @@ class Mutation:
                 delete_previous_file(theme_url.lstrip('/'))
             return PackageResponse(status=500, message=f"An error occurred: {e}")
         except Exception as e:
-            if banner_url:
+            if 'created_by_id' in locals() and banner_url:
                 delete_previous_file(banner_url.lstrip('/'))
-            if theme_url:
+            if 'created_by_id' in locals() and theme_url:
                 delete_previous_file(theme_url.lstrip('/'))
             return PackageResponse(status=500, message=f"An unexpected error occurred: {e}")
+
+
+
 
     @strawberry.mutation
     async def update_package(
         self,
+        info: strawberry.Info,
         package_id: str,
         title: Optional[str] = None,
         description: Optional[str] = None,
         banner_file: Optional[Upload] = None,
         theme_file: Optional[Upload] = None,
-        updated_by: Optional[str] = None
+        course_ids: Optional[List[str]] = None,
+        price: Optional[float] = None,
+        telegram_id: Optional[List[str]] = None # Updated to List[str]
     ) -> PackageResponse:
         try:
+            # ----------------- AUTHENTICATION CHECK (COMMENTED FOR DEVELOPMENT) -----------------
+            current_user: Optional[AuthenticatedUser] = info.context.get("current_user")
+            if not current_user:
+                return PackageResponse(status=401, message="Authentication required: You must be logged in.")
+            # ------------------------------------------------------------------------------------
+
             existing_package_doc = packages_collection.find_one({"_id": ObjectId(package_id)})
             if not existing_package_doc:
                 return PackageResponse(status=404, message="Package not found.")
+            
+            # ----------------- OWNERSHIP CHECK (COMMENTED FOR DEVELOPMENT) -----------------
+            # if str(existing_package_doc.get("createdBy")) != current_user.id:
+            #     raise Exception("Unauthorized: You do not have permission to update this package.")
+            updated_by_id = current_user.id
+            # -------------------------------------------------------------------------------
+
+            # ----------------- DEVELOPMENT PLACEHOLDER (UNCOMMENTED) -----------------
+            # updated_by_id = "development_user"
+            # -----------------------------------------------------------------------------
 
             update_data = {}
             current_banner_url = existing_package_doc.get("bannerUrl")
@@ -559,9 +581,18 @@ class Mutation:
                 update_data["title"] = title
             if description is not None:
                 update_data["description"] = description
-            if updated_by is not None:
-                update_data["updatedBy"] = updated_by
+            if course_ids is not None:
+                # Validate course IDs before updating
+                course_object_ids = [ObjectId(cid) for cid in course_ids]
+                if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(course_ids):
+                    return PackageResponse(status=404, message="One or more course IDs not found.")
+                update_data["course_ids"] = course_ids
+            if price is not None:
+                update_data["price"] = price
+            if telegram_id is not None:
+                update_data["telegram_id"] = telegram_id
             
+            update_data["updatedBy"] = updated_by_id
             update_data["updatedAt"] = datetime.utcnow()
 
             update_result = packages_collection.update_one(
@@ -585,205 +616,84 @@ class Mutation:
                         created_at=updated_package_doc.get("createdAt"),
                         updated_at=updated_package_doc.get("updatedAt"),
                         created_by=updated_package_doc.get("createdBy"),
-                        updated_by=updated_package_doc.get("updatedBy")
+                        updated_by=updated_package_doc.get("updatedBy"),
+                        course_ids=updated_package_doc.get("course_ids"),
+                        price=updated_package_doc.get("price", 0.0),
+                        telegram_id=updated_package_doc.get("telegram_id")
                     )
                 )
             else:
                 return PackageResponse(status=500, message="Failed to update package.")
-
         except (PyMongoError, ValueError) as e:
             return PackageResponse(status=500, message=f"An error occurred: {e}")
-        
-    ### To get the all packages of the users
-    @strawberry.mutation
-    def get_packages(self, created_by: Optional[str] = None) -> List[PackageDetailsType]:
-        """
-        Fetch packages:
-        - If created_by is not provided → only active (isDeleted = False) packages.
-        - If created_by is provided → all packages for that user, regardless of isDeleted status.
-        """
-        try:
-            query_filter = {}
-
-            if created_by:
-                # Match both string and ObjectId versions
-                creator_or = [{"createdBy": created_by}]
-                from bson import ObjectId
-                if ObjectId.is_valid(created_by):
-                    creator_or.append({"createdBy": ObjectId(created_by)})
-                query_filter["$or"] = creator_or
-            else:
-                # Only non-deleted packages if no creator filter
-                query_filter["isDeleted"] = False
-
-            packages = list(packages_collection.find(query_filter))
-            return [
-                PackageDetailsType(
-                    id=str(pkg["_id"]),
-                    title=pkg.get("title", ""),
-                    description=pkg.get("description"),
-                    banner_url=pkg.get("bannerUrl"),
-                    theme_url=pkg.get("themeUrl"),
-                    is_active=pkg.get("isActive"),
-                    is_deleted=pkg.get("isDeleted"),
-                    created_at=pkg.get("createdAt"),
-                    updated_at=pkg.get("updatedAt"),
-                    created_by=pkg.get("createdBy"),
-                    updated_by=pkg.get("updatedBy"),
-                    # NEW: Include the price in the response
-                    price=pkg.get("price", 0.0)
-                )
-                for pkg in packages
-            ]
-        except PyMongoError as e:
-            print(f"MongoDB Error: {e}")
-            return []
-
-    @strawberry.mutation
-    def create_package_bundle(self, input: PackageBundleInput) -> PackageBundleResponse:
-        """
-        Creates a new package bundle, linking a package to a list of courses.
-        """
-        try:
-            if not packages_collection.find_one({"_id": ObjectId(input.package_id)}):
-                return PackageBundleResponse(status=404, message="Parent package not found.")
-            
-            if package_bundle_collection.find_one({"package_id": input.package_id}):
-                return PackageBundleResponse(
-                    status=409, 
-                    message=f"Bundle for package '{input.package_id}' already exists. Use update_package_bundle instead."
-                )
-
-            course_object_ids = [ObjectId(cid) for cid in input.course_ids]
-            if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(input.course_ids):
-                return PackageBundleResponse(status=404, message="One or more course IDs not found.")
-
-            # NEW: Update the parent package with the price only if a price is provided
-            if input.price is not None:
-                packages_collection.update_one(
-                    {"_id": ObjectId(input.package_id)},
-                    {"$set": {"price": input.price}}
-                )
-
-            new_bundle_data = PackageBundleModel(
-                package_id=input.package_id,
-                course_ids=input.course_ids
-            )
-            
-            bundle_dict = new_bundle_data.model_dump(by_alias=True)
-            if bundle_dict.get('_id') is None:
-                del bundle_dict['_id']
-
-            insert_result = package_bundle_collection.insert_one(bundle_dict)
-
-            courses_docs = list(courses_collection.find({"_id": {"$in": course_object_ids}}))
-            resolved_courses = [
-                CourseType(
-                    id=str(c["_id"]),
-                    title=c.get("title"),
-                    description=c.get("description"),
-                    thumbnail=c.get("thumbnail"),
-                    language=c.get("language"),
-                    desktop_available=c.get("desktopAvailable", False),
-                    created_by=c.get("created_by"),
-                    creation_stage=c.get("creationStage"),
-                    publish_status=c.get("publishStatus"),
-                    is_deleted=c.get("isDeleted"),
-                    deleted_by=c.get("deletedBy"),
-                    deleted_at=c.get("deletedAt"),
-                    created_at=c.get("createdAt")
-                ) for c in courses_docs
-            ]
-
-            return PackageBundleResponse(
-                status=200,
-                message="Package bundle created successfully.",
-                data=PackageBundleType(
-                    id=str(insert_result.inserted_id),
-                    package_id=new_bundle_data.package_id,
-                    courses=resolved_courses,
-                    created_at=new_bundle_data.created_at
-                )
-            )
-
-        except (PyMongoError, ValueError) as e:
-            return PackageBundleResponse(status=500, message=f"An error occurred: {e}")
         except Exception as e:
-            return PackageBundleResponse(status=500, message=f"An unexpected error occurred: {e}")
+            return PackageResponse(status=500, message=f"An unexpected error occurred: {e}")
 
     @strawberry.mutation
-    def update_package_bundle(self, bundle_id: str, course_ids: List[str], price: Optional[float] = None) -> PackageBundleResponse:
-        """
-        Updates an existing package bundle with a new list of courses and an optional new price.
-        """
+    async def delete_package(
+        self,
+        info: strawberry.Info,
+        package_id: str
+    ) -> PackageResponse:
         try:
-            existing_bundle_doc = package_bundle_collection.find_one({"_id": ObjectId(bundle_id)})
-            if not existing_bundle_doc:
-                return PackageBundleResponse(status=404, message="Package bundle not found.")
+            # ----------------- AUTHENTICATION CHECK -----------------
+            # For development, you can use the commented out code
+            # deleted_by_id = "development_user"
+            current_user: Optional[AuthenticatedUser] = info.context.get("current_user")
+            if not current_user:
+                return PackageResponse(status=401, message="Authentication required: You must be logged in.")
+            deleted_by_id = current_user.id
+            # --------------------------------------------------------
 
-            course_object_ids = [ObjectId(cid) for cid in course_ids]
-            if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(course_ids):
-                return PackageBundleResponse(status=404, message="One or more course IDs not found.")
+            existing_package_doc = packages_collection.find_one({"_id": ObjectId(package_id)})
+            if not existing_package_doc:
+                return PackageResponse(status=404, message="Package not found.")
+            
+            # ----------------- OWNERSHIP CHECK -----------------
+            # if str(existing_package_doc.get("createdBy")) != current_user.id:
+            #     raise Exception("Unauthorized: You do not have permission to delete this package.")
+            # ---------------------------------------------------
 
-            # NEW: Update the parent package with the price if it's provided
-            if price is not None:
-                packages_collection.update_one(
-                    {"_id": ObjectId(existing_bundle_doc["package_id"])},
-                    {"$set": {"price": price}}
-                )
-
-            update_result = package_bundle_collection.update_one(
-                {"_id": ObjectId(bundle_id)},
-                {"$set": {"course_ids": course_ids}}
+            update_result = packages_collection.update_one(
+                {"_id": ObjectId(package_id)},
+                {"$set": {
+                    "isDeleted": True,
+                    "updatedAt": datetime.utcnow(),
+                    "updatedBy": deleted_by_id,
+                    "deletedAt": datetime.utcnow(), # Also good to add this
+                    "deletedBy": deleted_by_id # And this
+                }}
             )
 
             if update_result.modified_count == 1:
-                updated_bundle_doc = package_bundle_collection.find_one({"_id": ObjectId(bundle_id)})
-                
-                resolved_courses = [
-                    CourseType(
-                        id=str(c["_id"]),
-                        title=c.get("title"),
-                        description=c.get("description"),
-                        thumbnail=c.get("thumbnail"),
-                        language=c.get("language"),
-                        desktop_available=c.get("desktopAvailable", False),
-                        created_by=c.get("created_by"),
-                        creation_stage=c.get("creationStage"),
-                        publish_status=c.get("publishStatus"),
-                        is_deleted=c.get("isDeleted"),
-                        deleted_by=c.get("deletedBy"),
-                        deleted_at=c.get("deletedAt"),
-                        created_at=c.get("createdAt")
-                    ) for c in courses_collection.find({"_id": {"$in": course_object_ids}})
-                ]
-
-                return PackageBundleResponse(
+                updated_package_doc = packages_collection.find_one({"_id": ObjectId(package_id)})
+                return PackageResponse(
                     status=200,
-                    message="Package bundle updated successfully.",
-                    data=PackageBundleType(
-                        id=str(updated_bundle_doc["_id"]),
-                        package_id=updated_bundle_doc["package_id"],
-                        courses=resolved_courses,
-                        created_at=updated_bundle_doc["created_at"]
+                    message="Package deleted successfully.",
+                    data=PackageDetailsType(
+                        id=str(updated_package_doc["_id"]),
+                        title=updated_package_doc.get("title"),
+                        description=updated_package_doc.get("description"),
+                        banner_url=updated_package_doc.get("bannerUrl"),
+                        theme_url=updated_package_doc.get("themeUrl"),
+                        is_active=updated_package_doc.get("isActive"),
+                        is_deleted=updated_package_doc.get("isDeleted"),
+                        created_at=updated_package_doc.get("createdAt"),
+                        updated_at=updated_package_doc.get("updatedAt"),
+                        created_by=updated_package_doc.get("createdBy"),
+                        updated_by=updated_package_doc.get("updatedBy"),
+                        course_ids=updated_package_doc.get("course_ids"),
+                        price=updated_package_doc.get("price", 0.0),
+                        telegram_id=updated_package_doc.get("telegram_id", [])
                     )
                 )
             else:
-                return PackageBundleResponse(status=500, message="Failed to update package bundle.")
+                return PackageResponse(status=500, message="Failed to delete package.")
         except (PyMongoError, ValueError) as e:
-            return PackageBundleResponse(status=500, message=f"An error occurred: {e}")
+            return PackageResponse(status=500, message=f"An error occurred: {e}")
+        except Exception as e:
+            return PackageResponse(status=500, message=f"An unexpected error occurred: {e}")
 
-    @strawberry.mutation
-    def delete_package_bundle(self, bundle_id: str) -> PackageBundleResponse:
-        """Deletes a package bundle by its ID."""
-        try:
-            delete_result = package_bundle_collection.delete_one({"_id": ObjectId(bundle_id)})
-            if delete_result.deleted_count == 1:
-                return PackageBundleResponse(status=200, message="Package bundle deleted successfully.")
-            else:
-                return PackageBundleResponse(status=404, message="Package bundle not found.")
-        except (PyMongoError, ValueError) as e:
-            return PackageBundleResponse(status=500, message=f"An error occurred: {e}")
 
 # Create the schema
 schema = strawberry.Schema(query=Query, mutation=Mutation)
