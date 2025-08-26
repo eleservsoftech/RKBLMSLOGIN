@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from strawberry.file_uploads import Upload
 from dotenv import load_dotenv
 import jwt
+import re
 
 load_dotenv()
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -327,6 +328,19 @@ class Mutation:
     @strawberry.mutation
     def signup(self, input: UserInput) -> UserResponse:
         try:
+            # ----------------- VALIDATION CHECKS -----------------
+            # Phone number validation (exactly 10 digits)
+            if not input.phone.isdigit() or len(input.phone) != 10:
+                return UserResponse(status=400, message="Phone number must be exactly 10 digits.")
+
+            # Email format validation
+            if not re.match(r"[^@]+@[^@]+\.[^@]+", input.email):
+                return UserResponse(status=400, message="Invalid email format.")
+
+            # Password complexity validation
+            if len(input.password) < 8 or not any(c.isupper() for c in input.password) or not any(c.islower() for c in input.password) or not any(c.isdigit() for c in input.password):
+                return UserResponse(status=400, message="Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, and one digit.")
+            # -----------------------------------------------------
             if users_collection.find_one({"email": input.email}):
                 return UserResponse(status=409, message=f"User with email '{input.email}' already exists.")
             if users_collection.find_one({"phone": input.phone}):
