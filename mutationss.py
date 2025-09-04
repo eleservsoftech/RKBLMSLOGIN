@@ -450,9 +450,9 @@ class Mutation:
         description: str,
         banner_file: Upload,
         theme_file: Upload,
-        course_ids: List[str],
         price: float,
-        telegram_id: Optional[List[str]] = None  # Updated to List[str]
+        course_ids: Optional[List[str]] = None,   # Made Optional
+        telegram_id: Optional[List[str]] = None   # Already Optional
     ) -> PackageResponse:
         try:
             # ----------------- AUTHENTICATION CHECK (COMMENTED FOR DEVELOPMENT) -----------------
@@ -461,11 +461,11 @@ class Mutation:
                 return PackageResponse(status=401, message="Authentication required: You must be logged in.")
             created_by_id = current_user.id
             # ------------------------------------------------------------------------------------
-            
+
             # ----------------- DEVELOPMENT PLACEHOLDER (UNCOMMENTED) -----------------
             # created_by_id = "development_user"
             # -------------------------------------------------------------------------
-            
+
             # Check if a package with the same title already exists
             if packages_collection.find_one({"title": title, "isDeleted": False}):
                 return PackageResponse(status=409, message=f"Package with title '{title}' already exists.")
@@ -477,10 +477,15 @@ class Mutation:
             banner_url = await save_and_compress_file(banner_file, "banners")
             theme_url = await save_and_compress_file(theme_file, "themes")
 
-            # Validate course IDs
-            course_object_ids = [ObjectId(cid) for cid in course_ids]
-            if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(course_ids):
-                return PackageResponse(status=404, message="One or more course IDs not found.")
+            # Validate at least one of course_ids or telegram_id is provided
+            if not course_ids and not telegram_id:
+                return PackageResponse(status=400, message="Either course_ids or telegram_id must be provided.")
+
+            # Validate course IDs (only if provided)
+            if course_ids:
+                course_object_ids = [ObjectId(cid) for cid in course_ids]
+                if len(list(courses_collection.find({"_id": {"$in": course_object_ids}}))) != len(course_ids):
+                    return PackageResponse(status=404, message="One or more course IDs not found.")
 
             # Create new package data
             new_package_data = PackageModel(
@@ -489,11 +494,11 @@ class Mutation:
                 bannerUrl=banner_url,
                 themeUrl=theme_url,
                 createdBy=created_by_id,
-                course_ids=course_ids,
+                course_ids=course_ids if course_ids else [],
                 price=price,
-                telegram_id=telegram_id
+                telegram_id=telegram_id if telegram_id else []
             )
-            
+
             package_dict = new_package_data.model_dump(by_alias=True)
             if package_dict.get('_id') is None:
                 del package_dict['_id']
@@ -518,9 +523,9 @@ class Mutation:
                     updated_at=new_package_doc.get("updatedAt"),
                     created_by=new_package_doc.get("createdBy"),
                     updated_by=new_package_doc.get("updatedBy"),
-                    course_ids=new_package_doc.get("course_ids"),
+                    course_ids=new_package_doc.get("course_ids", []),
                     price=new_package_doc.get("price", 0.0),
-                    telegram_id=new_package_doc.get("telegram_id")
+                    telegram_id=new_package_doc.get("telegram_id", [])
                 )
             )
         except (PyMongoError, ValidationError) as e:
