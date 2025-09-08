@@ -65,15 +65,18 @@ class LoginModel(BaseModel):
         # NEW: Exclude fields with None values when dumping the model
         exclude_none = True
 
-
-# --- Model for Package Creation ---
+# NEW: Pydantic model for FAQ items
+class FaqModel(BaseModel):
+    question: str
+    answer: str
 
 class PackageModel(BaseModel):
     id: Optional[str] = Field(alias="_id", default=None)
     title: str
     description: Optional[str] = None
-    banner_url: Optional[str] = Field(default=None, alias="bannerUrl")
-    theme_url: Optional[str] = Field(default=None, alias="themeUrl")
+    thumbnail_url: Optional[str] = Field(alias="thumbnailUrl", default=None)
+    banner_url: Optional[str] = Field(alias="bannerUrl", default=None)
+    theme_url: Optional[str] = Field(alias="themeUrl", default=None)
     is_active: bool = Field(default=True, alias="isActive")
     is_deleted: bool = Field(default=False, alias="isDeleted")
     created_at: datetime = Field(default_factory=datetime.utcnow, alias="createdAt")
@@ -82,24 +85,14 @@ class PackageModel(BaseModel):
     updated_by: Optional[str] = Field(default=None, alias="updatedBy")
     course_ids: Optional[List[str]] = Field(default_factory=list, alias="course_ids")
     price: Optional[float] = None
-    telegram_id: Optional[List[str]] = Field(default=None) # Updated to List[str]
+    telegram_id: Optional[List[str]] = Field(default=None)
+    # CORRECTED: Use FaqModel instead of a generic dict
+    faqs: Optional[List[FaqModel]] = None
+    is_draft: bool = Field(default=False, alias="isDraft")
+
 
     class Config:
         populate_by_name = True
         arbitrary_types_allowed = True
         exclude_none = True
 
-# --- NEW: Model for Package Bundles ---
-# This model will link a package to a list of courses.
-class PackageBundleModel(BaseModel):
-    id: Optional[str] = Field(alias="_id", default=None)
-    package_id: str  # String ID of the linked package
-    course_ids: List[str] = []  # List of string IDs of the courses
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    # NEW: Add a price field to manage package cost
-    price: Optional[float] = Field(default=0.0)
-
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        exclude_none = True

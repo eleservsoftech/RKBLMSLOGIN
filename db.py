@@ -1,5 +1,5 @@
 # database.py
-from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import os
 from urllib.parse import quote_plus
@@ -26,7 +26,7 @@ MONGO_DETAILS = (
 )
 
 # --- Database Setup ---
-client = MongoClient(MONGO_DETAILS)
+client = AsyncIOMotorClient(MONGO_DETAILS)
 database = client[MONGO_DB]
 
 # Collections
