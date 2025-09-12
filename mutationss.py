@@ -356,12 +356,24 @@ class Query:
             return []
 
     @strawberry.field
-    async def get_packages(self, created_by: Optional[str] = None) -> List[PackageDetailsType]:
-        """Retrieves a list of packages, optionally filtered by the creator."""
-        logger.info(f"Entering get_packages with created_by: {created_by}")
+    async def get_packages(
+        self, created_by: Optional[str] = None, package_id: Optional[str] = None
+    ) -> List[PackageDetailsType]:
+        """Retrieves a list of packages, optionally filtered by the creator or a specific package ID."""
+        logger.info(f"Entering get_packages with created_by: {created_by}, package_id: {package_id}")
         try:
             query_filter = {}
-            if created_by:
+            
+            # New logic to handle querying by a single package ID
+            if package_id:
+                if ObjectId.is_valid(package_id):
+                    query_filter["_id"] = ObjectId(package_id)
+                else:
+                    logger.warning(f"get_packages: Invalid package_id provided: {package_id}")
+                    return []
+            
+            # Existing logic for filtering by created_by, only applied if package_id is not provided
+            elif created_by:
                 creator_or = [{"createdBy": created_by}]
                 if ObjectId.is_valid(created_by):
                     creator_or.append({"createdBy": ObjectId(created_by)})
@@ -383,7 +395,6 @@ class Query:
                 course_details_list = []
                 if pkg.get("course_ids"):
                     found_courses_data = await get_course_details_by_ids(pkg["course_ids"])
-                    # Map the raw data to the CourseDetailsType for the response
                     course_details_list = [
                         CourseDetailsType(
                             id=str(course["_id"]),
@@ -399,7 +410,7 @@ class Query:
                             is_deleted=course.get("isDeleted"),
                             deleted_by=course.get("deletedBy"),
                             deleted_at=course.get("deletedAt"),
-                            created_at=course.get("createdAt")
+                            created_at=course.get("createdAt"),
                         )
                         for course in found_courses_data
                     ]
@@ -407,32 +418,26 @@ class Query:
                 # --- 2. Convert Banner to Base64 ---
                 banner_base64_data = None
                 if pkg.get("bannerUrl"):
-                    # CORRECTED: Added "static" back to the path
                     file_path = os.path.normpath(os.path.join(pkg["bannerUrl"].lstrip('/')))
                     try:
                         with open(file_path, "rb") as image_file:
                             banner_base64_data = base64.b64encode(image_file.read()).decode('utf-8')
                     except FileNotFoundError:
                         logger.warning(f"get_packages: Banner file not found at {file_path}")
-                        print(f"Warning: Banner file not found at {file_path}")
                     except Exception as e:
                         logger.error(f"get_packages: Error reading banner file: {str(e)}")
-                        print(f"Error reading banner file: {e}")
-                
+
                 # --- 3. Convert Theme to Base64 ---
                 theme_base64_data = None
                 if pkg.get("themeUrl"):
-                    # CORRECTED: Added "static" back to the path
                     file_path = os.path.normpath(os.path.join(pkg["themeUrl"].lstrip('/')))
                     try:
                         with open(file_path, "rb") as image_file:
                             theme_base64_data = base64.b64encode(image_file.read()).decode('utf-8')
                     except FileNotFoundError:
                         logger.warning(f"get_packages: Theme file not found at {file_path}")
-                        print(f"Warning: Theme file not found at {file_path}")
                     except Exception as e:
                         logger.error(f"get_packages: Error reading theme file: {str(e)}")
-                        print(f"Error reading theme file: {e}")
 
                 # --- 4. Format FAQs ---
                 response_faqs = []
@@ -442,15 +447,15 @@ class Query:
                         for f in pkg.get("faqs", [])
                     ]
 
-                # Create the response object with all fields, including the new ones
+                # Create the response object with all fields
                 package_response = PackageDetailsType(
                     id=str(pkg["_id"]),
                     title=pkg.get("title", ""),
                     description=pkg.get("description"),
                     banner_url=pkg.get("bannerUrl"),
                     theme_url=pkg.get("themeUrl"),
-                    banner_base64=banner_base64_data,  # Now returns the Base64 data
-                    theme_base64=theme_base64_data, # New: Returns the Base64 data for the theme
+                    banner_base64=banner_base64_data,
+                    theme_base64=theme_base64_data,
                     is_active=pkg.get("isActive"),
                     is_deleted=pkg.get("isDeleted"),
                     is_draft=pkg.get("isDraft"),
@@ -460,7 +465,7 @@ class Query:
                     updated_by=pkg.get("updatedBy"),
                     price=pkg.get("price", 0.0),
                     course_ids=pkg.get("course_ids", []),
-                    course_details=course_details_list,  # New: Returns full course objects
+                    course_details=course_details_list,
                     telegram_id=pkg.get("telegram_id", []),
                     faqs=response_faqs,
                     deleted_at=None,
@@ -470,7 +475,7 @@ class Query:
 
             logger.info(f"get_packages: Successfully fetched {len(result_packages)} packages")
             return result_packages
-        
+
         except Exception as e:
             logger.error(f"get_packages: An unexpected error occurred: {str(e)}")
             print(f"An unexpected error occurred in get_packages: {e}")
