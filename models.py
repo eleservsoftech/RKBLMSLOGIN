@@ -70,6 +70,15 @@ class FaqModel(BaseModel):
     question: str
     answer: str
 
+class PriceModel(BaseModel):
+    period: str
+    actual_price: float = Field(alias="actualPrice") # Add alias for camelCase
+    price: float
+    gst: float
+    totalprice:float
+ # Add the Config class to your PriceModel
+    class Config:
+        populate_by_name = True
 class PackageModel(BaseModel):
     id: Optional[str] = Field(alias="_id", default=None)
     title: str
@@ -84,15 +93,20 @@ class PackageModel(BaseModel):
     created_by: Optional[str] = Field(default=None, alias="createdBy")
     updated_by: Optional[str] = Field(default=None, alias="updatedBy")
     course_ids: Optional[List[str]] = Field(default_factory=list, alias="course_ids")
-    price: Optional[float] = None
+    # REMOVED: This is no longer used for a single price
+    # price: Optional[float] = None
+    
+    # NEW: A list of PriceModel objects to handle multiple pricing tiers
+    price_details: Optional[List[PriceModel]] = Field(default=None, alias="price_details")
+    
     telegram_id: Optional[List[str]] = Field(default=None)
     # CORRECTED: Use FaqModel instead of a generic dict
     faqs: Optional[List[FaqModel]] = None
     is_draft: bool = Field(default=False, alias="isDraft")
+    status: Optional[str] = None  # NEW: Field to save the package status
 
 
     class Config:
         populate_by_name = True
         arbitrary_types_allowed = True
         exclude_none = True
-

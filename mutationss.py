@@ -45,6 +45,7 @@ from models import (
     LoginModel,
     UserTypeModel,
     PackageModel,
+    PriceModel,
     FaqModel # NEW: Import FaqModel from your models file
 )
 
@@ -114,23 +115,29 @@ class PackageDetailsType:
     description: Optional[str] = None
     banner_url: Optional[str] = strawberry.field(name="bannerUrl")
     theme_url: Optional[str] = strawberry.field(name="themeUrl")
-    banner_base64: Optional[str] = None  # Added field for Base64 data
-    theme_base64: Optional[str] = None    # Added field for Base64 data
+    banner_base64: Optional[str] = None
+    theme_base64: Optional[str] = None
     is_active: bool = strawberry.field(name="isActive")
     is_deleted: bool = strawberry.field(name="isDeleted")
     is_draft: bool = strawberry.field(name="isDraft")
+    status: Optional[str] = None  # New field to represent the package status
     created_at: datetime = strawberry.field(name="createdAt")
     updated_at: datetime = strawberry.field(name="updatedAt")
     created_by: Optional[str] = strawberry.field(name="createdBy")
     updated_by: Optional[str] = strawberry.field(name="updatedBy")
     deleted_at: Optional[datetime] = strawberry.field(name="deletedAt")
     deleted_by: Optional[str] = strawberry.field(name="deletedBy")
-    price: Optional[float] = None
+    # price: Optional[float] = None  # REMOVED: This is no longer used
+    
+    # NEW: The list of price details for different periods
+    price_details: Optional[List['PriceType']] = None
+    
     course_ids: Optional[List[str]] = None
     # NEW: Return a list of the full course objects
-    course_details: Optional[List[CourseDetailsType]] = None 
+    course_details: Optional[List[CourseDetailsType]] = None
     telegram_id: Optional[List[str]] = None
     faqs: Optional[List['FaqType']] = None
+    
 
     
     # @strawberry.field
@@ -184,6 +191,23 @@ class PackageBundleInput:
     course_ids: List[str]
     price: Optional[float] = None
 
+
+@strawberry.input
+class PriceInput:
+    period: str  # e.g., "6 months", "1 year"
+    actual_price: float
+    price: float
+    gst: float
+    totalprice:float
+
+@strawberry.type
+class PriceType:
+    period: str
+    actual_price: float = strawberry.field(name="actualPrice")
+    price: float
+    gst: float
+    totalprice:float
+
 @strawberry.type
 class UserResponse:
     status: int
@@ -229,6 +253,7 @@ async def save_and_compress_file(upload: Upload, subfolder: str) -> str:
     """
     logger.info(f"Entering save_and_compress_file with filename: {upload.filename}, subfolder: {subfolder}")
     extension = upload.filename.split(".")[-1]
+    # print('extension:',extension)
     filename = f"{uuid.uuid4()}.{extension}"
     folder_path = os.path.join("uploads", subfolder)
     os.makedirs(folder_path, exist_ok=True)
@@ -242,10 +267,11 @@ async def save_and_compress_file(upload: Upload, subfolder: str) -> str:
     image.save(file_path, optimize=True, quality=60)
 
     result = f"/uploads/{subfolder}/{filename}"
+    # print('result:',result)
     logger.info(f"save_and_compress_file: File saved successfully at {result}")
     return result
 
-def delete_previous_file(file_path: Optional[str]):
+async def delete_previous_file(file_path: Optional[str]):
     """
     Deletes a file if the path exists and is not a default or null value.
     """
@@ -355,6 +381,129 @@ class Query:
             print(f"MongoDB Error: {e}")
             return []
 
+    # @strawberry.field
+    # async def get_packages(self, created_by: Optional[str] = None) -> List[PackageDetailsType]:
+    #     """Retrieves a list of packages, optionally filtered by the creator."""
+    #     logger.info(f"Entering get_packages with created_by: {created_by}")
+    #     try:
+    #         query_filter = {}
+    #         if created_by:
+    #             creator_or = [{"createdBy": created_by}]
+    #             if ObjectId.is_valid(created_by):
+    #                 creator_or.append({"createdBy": ObjectId(created_by)})
+    #             query_filter["$or"] = creator_or
+    #         else:
+    #             query_filter["isDeleted"] = False
+
+    #         # CORRECTED: Added 'await' to get the list of packages
+    #         packages_cursor = packages_collection.find(query_filter)
+    #         packages = await packages_cursor.to_list(length=None)
+
+    #         if not packages:
+    #             logger.info("get_packages: No packages found")
+    #             return []
+
+    #         result_packages = []
+    #         for pkg in packages:
+    #             # --- 1. Fetch Course Details ---
+    #             course_details_list = []
+    #             if pkg.get("course_ids"):
+    #                 found_courses_data = await get_course_details_by_ids(pkg["course_ids"])
+    #                 print('found_courses_data')
+    #                 print(found_courses_data)
+    #                 # Map the raw data to the CourseDetailsType for the response
+    #                 course_details_list = [
+    #                     CourseDetailsType(
+    #                         id=str(course["_id"]),
+    #                         title=course.get("title", ""),
+    #                         description=course.get("description"),
+    #                         thumbnail=course.get("thumbnail"),
+    #                         hls=course.get("hls"),
+    #                         language=course.get("language"),
+    #                         desktop_available=course.get("desktopAvailable"),
+    #                         created_by=str(course.get("createdBy")) if course.get("createdBy") else None,
+    #                         creation_stage=course.get("creationStage"),
+    #                         publish_status=course.get("publishStatus"),
+    #                         is_deleted=course.get("isDeleted"),
+    #                         deleted_by=course.get("deletedBy"),
+    #                         deleted_at=course.get("deletedAt"),
+    #                         created_at=course.get("createdAt")
+    #                     )
+    #                     for course in found_courses_data
+    #                 ]
+
+    #             # --- 2. Convert Banner to Base64 ---
+    #             banner_base64_data = None
+    #             if pkg.get("bannerUrl"):
+    #                 # CORRECTED: Added "static" back to the path
+    #                 file_path = os.path.normpath(os.path.join(pkg["bannerUrl"].lstrip('/')))
+    #                 try:
+    #                     with open(file_path, "rb") as image_file:
+    #                         banner_base64_data = base64.b64encode(image_file.read()).decode('utf-8')
+    #                 except FileNotFoundError:
+    #                     logger.warning(f"get_packages: Banner file not found at {file_path}")
+    #                     print(f"Warning: Banner file not found at {file_path}")
+    #                 except Exception as e:
+    #                     logger.error(f"get_packages: Error reading banner file: {str(e)}")
+    #                     print(f"Error reading banner file: {e}")
+                
+    #             # --- 3. Convert Theme to Base64 ---
+    #             theme_base64_data = None
+    #             if pkg.get("themeUrl"):
+    #                 # CORRECTED: Added "static" back to the path
+    #                 file_path = os.path.normpath(os.path.join(pkg["themeUrl"].lstrip('/')))
+    #                 try:
+    #                     with open(file_path, "rb") as image_file:
+    #                         theme_base64_data = base64.b64encode(image_file.read()).decode('utf-8')
+    #                 except FileNotFoundError:
+    #                     logger.warning(f"get_packages: Theme file not found at {file_path}")
+    #                     print(f"Warning: Theme file not found at {file_path}")
+    #                 except Exception as e:
+    #                     logger.error(f"get_packages: Error reading theme file: {str(e)}")
+    #                     print(f"Error reading theme file: {e}")
+
+    #             # --- 4. Format FAQs ---
+    #             response_faqs = []
+    #             if pkg.get("faqs"):
+    #                 response_faqs = [
+    #                     FaqType(question=f.get('question'), answer=f.get('answer'))
+    #                     for f in pkg.get("faqs", [])
+    #                 ]
+
+    #             # Create the response object with all fields, including the new ones
+    #             package_response = PackageDetailsType(
+    #                 id=str(pkg["_id"]),
+    #                 title=pkg.get("title", ""),
+    #                 description=pkg.get("description"),
+    #                 banner_url=pkg.get("bannerUrl"),
+    #                 theme_url=pkg.get("themeUrl"),
+    #                 banner_base64=banner_base64_data,  # Now returns the Base64 data
+    #                 theme_base64=theme_base64_data, # New: Returns the Base64 data for the theme
+    #                 is_active=pkg.get("isActive"),
+    #                 is_deleted=pkg.get("isDeleted"),
+    #                 is_draft=pkg.get("isDraft"),
+    #                 created_at=pkg.get("createdAt"),
+    #                 updated_at=pkg.get("updatedAt"),
+    #                 created_by=pkg.get("createdBy"),
+    #                 updated_by=pkg.get("updatedBy"),
+    #                 price=pkg.get("price", 0.0),
+    #                 course_ids=pkg.get("course_ids", []),
+    #                 course_details=course_details_list,  # New: Returns full course objects
+    #                 telegram_id=pkg.get("telegram_id", []),
+    #                 faqs=response_faqs,
+    #                 deleted_at=None,
+    #                 deleted_by=None,
+    #             )
+    #             result_packages.append(package_response)
+
+    #         logger.info(f"get_packages: Successfully fetched {len(result_packages)} packages")
+    #         return result_packages
+        
+    #     except Exception as e:
+    #         logger.error(f"get_packages: An unexpected error occurred: {str(e)}")
+    #         print(f"An unexpected error occurred in get_packages: {e}")
+    #         return []
+
     @strawberry.field
     async def get_packages(
         self, created_by: Optional[str] = None, package_id: Optional[str] = None
@@ -364,7 +513,7 @@ class Query:
         try:
             query_filter = {}
             
-            # New logic to handle querying by a single package ID
+            # --- 1. Filter by package_id ---
             if package_id:
                 if ObjectId.is_valid(package_id):
                     query_filter["_id"] = ObjectId(package_id)
@@ -372,7 +521,7 @@ class Query:
                     logger.warning(f"get_packages: Invalid package_id provided: {package_id}")
                     return []
             
-            # Existing logic for filtering by created_by, only applied if package_id is not provided
+            # --- 2. Filter by created_by ---
             elif created_by:
                 creator_or = [{"createdBy": created_by}]
                 if ObjectId.is_valid(created_by):
@@ -381,7 +530,6 @@ class Query:
             else:
                 query_filter["isDeleted"] = False
 
-            # CORRECTED: Added 'await' to get the list of packages
             packages_cursor = packages_collection.find(query_filter)
             packages = await packages_cursor.to_list(length=None)
 
@@ -391,7 +539,7 @@ class Query:
 
             result_packages = []
             for pkg in packages:
-                # --- 1. Fetch Course Details ---
+                # --- Fetch Course Details ---
                 course_details_list = []
                 if pkg.get("course_ids"):
                     found_courses_data = await get_course_details_by_ids(pkg["course_ids"])
@@ -415,7 +563,7 @@ class Query:
                         for course in found_courses_data
                     ]
 
-                # --- 2. Convert Banner to Base64 ---
+                # --- Convert Banner to Base64 ---
                 banner_base64_data = None
                 if pkg.get("bannerUrl"):
                     file_path = os.path.normpath(os.path.join(pkg["bannerUrl"].lstrip('/')))
@@ -427,7 +575,7 @@ class Query:
                     except Exception as e:
                         logger.error(f"get_packages: Error reading banner file: {str(e)}")
 
-                # --- 3. Convert Theme to Base64 ---
+                # --- Convert Theme to Base64 ---
                 theme_base64_data = None
                 if pkg.get("themeUrl"):
                     file_path = os.path.normpath(os.path.join(pkg["themeUrl"].lstrip('/')))
@@ -439,7 +587,7 @@ class Query:
                     except Exception as e:
                         logger.error(f"get_packages: Error reading theme file: {str(e)}")
 
-                # --- 4. Format FAQs ---
+                # --- Format FAQs ---
                 response_faqs = []
                 if pkg.get("faqs"):
                     response_faqs = [
@@ -447,7 +595,18 @@ class Query:
                         for f in pkg.get("faqs", [])
                     ]
 
-                # Create the response object with all fields
+                # --- Format Price Details ---
+                response_price_details = [
+                    PriceType(
+                        period=p.get("period"),
+                        actual_price=p.get("actualPrice", p.get("actual_price")),
+                        price=p.get("price"),
+                        gst=p.get("gst"),
+                        totalprice=p.get('totalprice')
+                    ) for p in pkg.get("price_details", [])
+                ] if pkg.get("price_details") else []
+
+                # --- Prepare Final Response ---
                 package_response = PackageDetailsType(
                     id=str(pkg["_id"]),
                     title=pkg.get("title", ""),
@@ -459,17 +618,19 @@ class Query:
                     is_active=pkg.get("isActive"),
                     is_deleted=pkg.get("isDeleted"),
                     is_draft=pkg.get("isDraft"),
+                    status=pkg.get("status", "active"),  # <-- Added missing field
                     created_at=pkg.get("createdAt"),
                     updated_at=pkg.get("updatedAt"),
                     created_by=pkg.get("createdBy"),
                     updated_by=pkg.get("updatedBy"),
-                    price=pkg.get("price", 0.0),
                     course_ids=pkg.get("course_ids", []),
                     course_details=course_details_list,
+                    # price=pkg.get("price", 0.0),  # OLD field (keeping if needed)
+                    price_details=response_price_details,  # <-- Added missing field
                     telegram_id=pkg.get("telegram_id", []),
                     faqs=response_faqs,
-                    deleted_at=None,
-                    deleted_by=None,
+                    deleted_at=pkg.get("deletedAt"),
+                    deleted_by=pkg.get("deletedBy"),
                 )
                 result_packages.append(package_response)
 
@@ -659,21 +820,164 @@ class Mutation:
 
     # @strawberry.type
     # class Mutation:
+    # @strawberry.mutation
+    # async def create_package(
+    #     self,
+    #     info: strawberry.Info,
+    #     title: str,
+    #     description: str,
+    #     banner_file: Upload,
+    #     theme_file: Upload,
+    #     price: float,
+    #     course_ids: Optional[List[str]] = None,
+    #     telegram_id: Optional[List[str]] = None,
+    #     faqs: Optional[List[FaqInput]] = None,
+    #     is_draft: Optional[bool] = None
+    # ) -> PackageResponse:
+    #     logger.info(f"Entering create_package with title: {title}, description: {description}, price: {price}, course_ids: {course_ids}, telegram_id: {telegram_id}, is_draft: {is_draft}")
+    #     banner_url = None
+    #     theme_url = None
+    #     banner_base64_data = None
+    #     theme_base64_data = None
+        
+    #     try:
+    #         current_user: Optional[AuthenticatedUser] = info.context.get("current_user")
+    #         if not current_user:
+    #             result = PackageResponse(status=401, message="Authentication required: You must be logged in.")
+    #             logger.info(f"create_package: {result.message}")
+    #             return result
+    #         created_by_id = current_user.id
+    #         print(created_by_id)
+    #         print(title)
+    #         # CORRECTED: Await the database call
+    #         if await packages_collection.find_one({"title": title, "isDeleted": False}):
+    #             result = PackageResponse(status=409, message=f"Package with title '{title}' already exists.")
+    #             logger.info(f"create_package: {result.message}")
+    #             return result
+    #         print(banner_file)
+    #         # CORRECTED: Await reading the file content
+    #         banner_content = await banner_file.read()
+    #         # print('banner_content:',banner_content)
+    #         theme_content = await theme_file.read()
+    #         banner_base64_data = base64.b64encode(banner_content).decode('utf-8')
+    #         theme_base64_data = base64.b64encode(theme_content).decode('utf-8')
+
+    #         # CORRECTED: Await resetting the file pointer
+    #         await banner_file.seek(0)
+    #         await theme_file.seek(0)
+
+    #         banner_url = await save_and_compress_file(banner_file, "banners")
+    #         print(banner_url)
+    #         theme_url = await save_and_compress_file(theme_file, "themes")
+    #         print(theme_url)
+
+    #         if not course_ids and not telegram_id:
+    #             result = PackageResponse(status=400, message="Either course_ids or telegram_id must be provided.")
+    #             logger.info(f"create_package: {result.message}")
+    #             return result
+
+    #         if course_ids:
+    #             course_object_ids = [ObjectId(cid) for cid in course_ids]
+    #             # CORRECTED: Await the .to_list() method on the async cursor
+    #             found_courses = await courses_collection.find({"_id": {"$in": course_object_ids}}).to_list(length=None)
+    #             if len(found_courses) != len(course_ids):
+    #                 result = PackageResponse(status=404, message="One or more course IDs not found.")
+    #                 logger.info(f"create_package: {result.message}")
+    #                 return result
+
+    #         faqs_data = [FaqModel(question=faq.question, answer=faq.answer) for faq in faqs] if faqs else []
+    #         print(faqs_data)
+    #         is_draft_value = is_draft if is_draft is not None else False
+    #         print(is_draft_value)
+
+    #         new_package_data = PackageModel(
+    #             title=title,
+    #             description=description,
+    #             banner_url=banner_url,
+    #             theme_url=theme_url,
+    #             created_by=created_by_id,
+    #             course_ids=course_ids if course_ids else [],
+    #             price=price,
+    #             telegram_id=telegram_id if telegram_id else [],
+    #             faqs=faqs_data,
+    #             is_draft=is_draft_value
+    #         )
+
+    #         package_dict = new_package_data.model_dump(by_alias=True, exclude_none=True)
+            
+    #         # CORRECTED: Await inserting the new document
+    #         insert_result = await packages_collection.insert_one(package_dict)
+
+    #         # CORRECTED: Await finding the new document
+    #         new_package_doc = await packages_collection.find_one({"_id": insert_result.inserted_id})
+
+    #         if not new_package_doc:
+    #             logger.error("create_package: Failed to retrieve the newly created package.")
+    #             raise Exception("Failed to retrieve the newly created package.")
+
+    #         response_faqs = [FaqType(question=f.get('question'), answer=f.get('answer')) for f in new_package_doc.get("faqs", [])]
+
+    #         result = PackageResponse(
+    #             status=201,
+    #             message="Package created successfully.",
+    #             data=PackageDetailsType(
+    #                 id=str(new_package_doc["_id"]),
+    #                 title=new_package_doc.get("title"),
+    #                 description=new_package_doc.get("description"),
+    #                 banner_url=new_package_doc.get("bannerUrl"),
+    #                 theme_url=new_package_doc.get("themeUrl"),
+    #                 banner_base64=banner_base64_data,
+    #                 theme_base64=theme_base64_data,
+    #                 is_active=new_package_doc.get("isActive"),
+    #                 is_deleted=new_package_doc.get("isDeleted"),
+    #                 created_at=new_package_doc.get("createdAt"),
+    #                 updated_at=new_package_doc.get("updatedAt"),
+    #                 created_by=new_package_doc.get("createdBy"),
+    #                 updated_by=new_package_doc.get("updatedBy"),
+    #                 course_ids=new_package_doc.get("course_ids", []),
+    #                 price=new_package_doc.get("price", 0.0),
+    #                 telegram_id=new_package_doc.get("telegram_id", []),
+    #                 faqs=response_faqs,
+    #                 deleted_at=None,
+    #                 deleted_by=None,
+    #                 # isDraft=new_package_doc.get("isDraft", False)
+    #                 is_draft=new_package_doc.get("isDraft", False)
+    #             )
+    #         )
+    #         logger.info(f"create_package: Successfully created package with id {new_package_doc['_id']}")
+    #         return result
+
+    #     except (PyMongoError, ValidationError) as e:
+    #         if banner_url:
+    #             delete_previous_file(banner_url.lstrip('/'))
+    #         if theme_url:
+    #             delete_previous_file(theme_url.lstrip('/'))
+    #         logger.error(f"create_package: Database or validation error: {str(e)}")
+    #         return PackageResponse(status=500, message=f"A database or validation error occurred: {e}")
+    #     except Exception as e:
+    #         if banner_url:
+    #             delete_previous_file(banner_url.lstrip('/'))
+    #         if theme_url:
+    #             delete_previous_file(theme_url.lstrip('/'))
+    #         logger.error(f"create_package: Unexpected error: {str(e)}")
+    #         return PackageResponse(status=500, message=f"An unexpected error occurred: {e}")
+
     @strawberry.mutation
     async def create_package(
         self,
         info: strawberry.Info,
-        title: str,
-        description: str,
-        banner_file: Upload,
-        theme_file: Upload,
-        price: float,
+        title: Optional[str] = None,  # Made optional for is_draft=True
+        description: Optional[str] = None, # Made optional for is_draft=True
+        banner_file: Optional[Upload] = None, # Made optional for is_draft=True
+        theme_file: Optional[Upload] = None, # Made optional for is_draft=True
+        price_details: Optional[List[PriceInput]] = None, # New optional parameter for price details
         course_ids: Optional[List[str]] = None,
         telegram_id: Optional[List[str]] = None,
         faqs: Optional[List[FaqInput]] = None,
-        is_draft: Optional[bool] = None
+        is_draft: Optional[bool] = None,
+        status: Optional[str] = None # New optional parameter for package status
     ) -> PackageResponse:
-        logger.info(f"Entering create_package with title: {title}, description: {description}, price: {price}, course_ids: {course_ids}, telegram_id: {telegram_id}, is_draft: {is_draft}")
+        logger.info(f"Entering create_package with title: {title}, description: {description}, price_details: {price_details}, course_ids: {course_ids}, telegram_id: {telegram_id}, is_draft: {is_draft}, status: {status}")
         banner_url = None
         theme_url = None
         banner_base64_data = None
@@ -686,38 +990,46 @@ class Mutation:
                 logger.info(f"create_package: {result.message}")
                 return result
             created_by_id = current_user.id
-            print(created_by_id)
-            print(title)
-            # CORRECTED: Await the database call
-            if await packages_collection.find_one({"title": title, "isDeleted": False}):
-                result = PackageResponse(status=409, message=f"Package with title '{title}' already exists.")
-                logger.info(f"create_package: {result.message}")
-                return result
-            print(banner_file)
-            # CORRECTED: Await reading the file content
-            banner_content = await banner_file.read()
-            # print('banner_content:',banner_content)
-            theme_content = await theme_file.read()
-            banner_base64_data = base64.b64encode(banner_content).decode('utf-8')
-            theme_base64_data = base64.b64encode(theme_content).decode('utf-8')
 
-            # CORRECTED: Await resetting the file pointer
-            await banner_file.seek(0)
-            await theme_file.seek(0)
+            # Enhanced: Handle mandatory fields only if not a draft
+            is_draft_value = is_draft if is_draft is not None else False
+            if not is_draft_value:
+                # Ensure all mandatory fields are present for a non-draft package
+                if not title:
+                    return PackageResponse(status=400, message="Title is required for a non-draft package.")
+                if not description:
+                    return PackageResponse(status=400, message="Description is required for a non-draft package.")
+                if not banner_file or not theme_file:
+                    return PackageResponse(status=400, message="Both banner and theme files are required for a non-draft package.")
+                if not price_details:
+                    return PackageResponse(status=400, message="Price details are required for a non-draft package.")
+                if not course_ids and not telegram_id:
+                    return PackageResponse(status=400, message="Either course_ids or telegram_id must be provided for a non-draft package.")
 
-            banner_url = await save_and_compress_file(banner_file, "banners")
-            print(banner_url)
-            theme_url = await save_and_compress_file(theme_file, "themes")
-            print(theme_url)
+                # Enhanced: Await the database call only if title is provided
+                if await packages_collection.find_one({"title": title, "isDeleted": False}):
+                    result = PackageResponse(status=409, message=f"Package with title '{title}' already exists.")
+                    logger.info(f"create_package: {result.message}")
+                    return result
+            
+            # Enhanced: Conditional file processing
+            if banner_file:
+                banner_content = await banner_file.read()
+                theme_content = await theme_file.read()
+                banner_base64_data = base64.b64encode(banner_content).decode('utf-8')
+                theme_base64_data = base64.b64encode(theme_content).decode('utf-8')
 
-            if not course_ids and not telegram_id:
-                result = PackageResponse(status=400, message="Either course_ids or telegram_id must be provided.")
-                logger.info(f"create_package: {result.message}")
-                return result
+                # Await resetting the file pointer
+                await banner_file.seek(0)
+                await theme_file.seek(0)
 
-            if course_ids:
+                banner_url = await save_and_compress_file(banner_file, "banners")
+                theme_url = await save_and_compress_file(theme_file, "themes")
+
+            # Original logic for course_ids and telegram_id
+            # if course_ids:
+            if not is_draft_value and course_ids:
                 course_object_ids = [ObjectId(cid) for cid in course_ids]
-                # CORRECTED: Await the .to_list() method on the async cursor
                 found_courses = await courses_collection.find({"_id": {"$in": course_object_ids}}).to_list(length=None)
                 if len(found_courses) != len(course_ids):
                     result = PackageResponse(status=404, message="One or more course IDs not found.")
@@ -725,9 +1037,18 @@ class Mutation:
                     return result
 
             faqs_data = [FaqModel(question=faq.question, answer=faq.answer) for faq in faqs] if faqs else []
-            print(faqs_data)
-            is_draft_value = is_draft if is_draft is not None else False
-            print(is_draft_value)
+
+            # Enhanced: Prepare price data
+            price_data = [PriceModel(
+                period=p.period,
+                actual_price=p.actual_price,
+                price=p.price,
+                gst=p.gst,
+                totalprice=p.totalprice
+            ) for p in price_details] if price_details else []
+
+            # Enhanced: Determine status
+            status_value = status if status else "active" # Default status to 'active' if not provided
 
             new_package_data = PackageModel(
                 title=title,
@@ -736,18 +1057,17 @@ class Mutation:
                 theme_url=theme_url,
                 created_by=created_by_id,
                 course_ids=course_ids if course_ids else [],
-                price=price,
+                # Enhanced: Save the list of price details
+                price_details=price_data,
                 telegram_id=telegram_id if telegram_id else [],
                 faqs=faqs_data,
-                is_draft=is_draft_value
+                is_draft=is_draft_value,
+                status=status_value # Save the new status field
             )
 
             package_dict = new_package_data.model_dump(by_alias=True, exclude_none=True)
             
-            # CORRECTED: Await inserting the new document
             insert_result = await packages_collection.insert_one(package_dict)
-
-            # CORRECTED: Await finding the new document
             new_package_doc = await packages_collection.find_one({"_id": insert_result.inserted_id})
 
             if not new_package_doc:
@@ -755,6 +1075,15 @@ class Mutation:
                 raise Exception("Failed to retrieve the newly created package.")
 
             response_faqs = [FaqType(question=f.get('question'), answer=f.get('answer')) for f in new_package_doc.get("faqs", [])]
+            
+            # Enhanced: Prepare response price details
+            response_price_details = [PriceType(
+                period=p.get('period'),
+                actual_price=p.get("actualPrice", p.get("actual_price")),
+                price=p.get('price'),
+                gst=p.get('gst'),
+                totalprice=p.get('totalprice')
+            ) for p in new_package_doc.get("price_details", [])]
 
             result = PackageResponse(
                 status=201,
@@ -774,13 +1103,14 @@ class Mutation:
                     created_by=new_package_doc.get("createdBy"),
                     updated_by=new_package_doc.get("updatedBy"),
                     course_ids=new_package_doc.get("course_ids", []),
-                    price=new_package_doc.get("price", 0.0),
+                    # price=new_package_doc.get("price", 0.0), # Removed old price field
+                    price_details=response_price_details, # New price details field
                     telegram_id=new_package_doc.get("telegram_id", []),
                     faqs=response_faqs,
                     deleted_at=None,
                     deleted_by=None,
-                    # isDraft=new_package_doc.get("isDraft", False)
-                    is_draft=new_package_doc.get("isDraft", False)
+                    is_draft=new_package_doc.get("isDraft", False),
+                    status=new_package_doc.get("status", "active") # New status field
                 )
             )
             logger.info(f"create_package: Successfully created package with id {new_package_doc['_id']}")
@@ -811,11 +1141,14 @@ class Mutation:
         banner_file: Optional[Upload] = None,
         theme_file: Optional[Upload] = None,
         course_ids: Optional[List[str]] = None,
-        price: Optional[float] = None,
+        price_details: Optional[List[PriceInput]] = None,
         telegram_id: Optional[List[str]] = None,
-        faqs: Optional[List[FaqInput]] = None
+        faqs: Optional[List[FaqInput]] = None,
+        is_draft: Optional[bool] = None,
+        status: Optional[str] = None,
     ) -> PackageResponse:
-        logger.info(f"Entering update_package with package_id: {package_id}, title: {title}, description: {description}, course_ids: {course_ids}, price: {price}, telegram_id: {telegram_id}")
+        logger.info(f"Entering update_package with package_id: {package_id}, title: {title}, description: {description}, course_ids: {course_ids}, price_details: {price_details}, telegram_id: {telegram_id}, is_draft: {is_draft}, status: {status}")
+
         try:
             # ----------------- AUTHENTICATION CHECK (COMMENTED FOR DEVELOPMENT) -----------------
             current_user: Optional[AuthenticatedUser] = info.context.get("current_user")
@@ -833,7 +1166,7 @@ class Mutation:
             
             # ----------------- OWNERSHIP CHECK (COMMENTED FOR DEVELOPMENT) -----------------
             # if str(existing_package_doc.get("createdBy")) != current_user.id:
-            #     raise Exception("Unauthorized: You do not have permission to update this package.")
+            #    raise Exception("Unauthorized: You do not have permission to update this package.")
             updated_by_id = current_user.id
             # -------------------------------------------------------------------------------
 
@@ -842,49 +1175,75 @@ class Mutation:
             # -----------------------------------------------------------------------------
 
             update_data = {}
-            current_banner_url = existing_package_doc.get("bannerUrl")
-            current_theme_url = existing_package_doc.get("themeUrl")
 
+            # Handle banner file update
             if banner_file:
-                if current_banner_url:
-                    # Assuming delete_previous_file is an async function
-                    await delete_previous_file(current_banner_url.lstrip('/'))
-                # Assuming save_and_compress_file is an async function
+                if existing_package_doc.get("bannerUrl"):
+                    await delete_previous_file(existing_package_doc["bannerUrl"].lstrip('/'))
+                
                 update_data["bannerUrl"] = await save_and_compress_file(banner_file, "banners")
             else:
-                update_data["bannerUrl"] = current_banner_url
-
+                update_data["bannerUrl"] = existing_package_doc.get("bannerUrl")
+            
+            # Handle theme file update
             if theme_file:
-                if current_theme_url:
-                    await delete_previous_file(current_theme_url.lstrip('/'))
+                if existing_package_doc.get("themeUrl"):
+                    await delete_previous_file(existing_package_doc["themeUrl"].lstrip('/'))
+
                 update_data["themeUrl"] = await save_and_compress_file(theme_file, "themes")
             else:
-                update_data["themeUrl"] = current_theme_url
+                update_data["themeUrl"] = existing_package_doc.get("themeUrl")
 
+
+            # Update scalar fields if provided
             if title is not None:
                 update_data["title"] = title
             if description is not None:
                 update_data["description"] = description
-            if course_ids is not None:
-                course_object_ids = [ObjectId(cid) for cid in course_ids]
-                if len(list(await courses_collection.find({"_id": {"$in": course_object_ids}}).to_list(length=None))) != len(course_ids):
-                    result = PackageResponse(status=404, message="One or more course IDs not found.")
-                    logger.info(f"update_package: {result.message}")
-                    return result
-                update_data["course_ids"] = course_ids
-            if price is not None:
-                update_data["price"] = price
             if telegram_id is not None:
                 update_data["telegram_id"] = telegram_id
             
-            # CORRECTED: Update faqs directly on the package document
+            # Handle price_details
+            if price_details is not None:
+                # update_data["priceDetails"] = [
+                update_data["price_details"] = [
+                    PriceModel(
+                        period=p.period, 
+                        actual_price=p.actual_price, 
+                        price=p.price, 
+                        gst=p.gst,
+                        totalprice=p.totalprice
+                    ).model_dump(by_alias=True) for p in price_details
+                ]
+                
+            # Handle is_draft and status
+            if is_draft is not None:
+                update_data["isDraft"] = is_draft
+            if status is not None:
+                update_data["status"] = status
+            
+            # Handle faqs
             if faqs is not None:
                 faq_docs = [{"question": faq.question, "answer": faq.answer} for faq in faqs]
                 update_data["faqs"] = faq_docs
 
+            # Handle course_ids and add draft-specific validation logic
+            if course_ids is not None:
+                is_now_draft = update_data.get("isDraft", existing_package_doc.get("isDraft"))
+                if not is_now_draft:
+                    course_object_ids = [ObjectId(cid) for cid in course_ids]
+                    found_courses = await courses_collection.find({"_id": {"$in": course_object_ids}}).to_list(length=None)
+                    if len(found_courses) != len(course_ids):
+                        result = PackageResponse(status=404, message="One or more course IDs not found.")
+                        logger.info(f"update_package: {result.message}")
+                        return result
+                update_data["course_ids"] = course_ids
+                
+            # Set common update fields
             update_data["updatedBy"] = updated_by_id
             update_data["updatedAt"] = datetime.utcnow()
 
+            # Perform the update operation
             update_result = await packages_collection.update_one(
                 {"_id": ObjectId(package_id)},
                 {"$set": update_data}
@@ -893,6 +1252,18 @@ class Mutation:
             if update_result.modified_count == 1:
                 updated_package_doc = await packages_collection.find_one({"_id": ObjectId(package_id)})
                 
+                # Prepare the response data, handling the new fields
+                response_faqs = [FaqType(**doc) for doc in updated_package_doc.get("faqs", [])]
+                response_price_details = [
+                    PriceType(
+                        period=p.get('period'),
+                        actual_price=p.get('actualPrice'),
+                        price=p.get('price'),
+                        gst=p.get('gst'),
+                        totalprice=p.get('totalprice')
+                    ) for p in updated_package_doc.get("price_details", [])
+                ]
+
                 result = PackageResponse(
                     status=200,
                     message="Package updated successfully.",
@@ -904,17 +1275,18 @@ class Mutation:
                         theme_url=updated_package_doc.get("themeUrl"),
                         is_active=updated_package_doc.get("isActive"),
                         is_deleted=updated_package_doc.get("isDeleted"),
+                        is_draft=updated_package_doc.get("isDraft"),
+                        status=updated_package_doc.get("status"),
                         created_at=updated_package_doc.get("createdAt"),
                         updated_at=updated_package_doc.get("updatedAt"),
                         created_by=updated_package_doc.get("createdBy"),
                         updated_by=updated_package_doc.get("updatedBy"),
                         course_ids=updated_package_doc.get("course_ids"),
-                        price=updated_package_doc.get("price", 0.0),
+                        price_details=response_price_details,
                         telegram_id=updated_package_doc.get("telegram_id"),
-                        deleted_at=None,
-                        deleted_by=None,
-                        is_draft=updated_package_doc.get("isDraft"),
-                        faqs=[FaqType(**doc) for doc in updated_package_doc.get("faqs", [])]
+                        deleted_at=updated_package_doc.get("deletedAt"),
+                        deleted_by=updated_package_doc.get("deletedBy"),
+                        faqs=response_faqs
                     )
                 )
                 logger.info(f"update_package: Successfully updated package with id {package_id}")
@@ -923,9 +1295,10 @@ class Mutation:
                 result = PackageResponse(status=500, message="Failed to update package.")
                 logger.info(f"update_package: {result.message}")
                 return result
-        except (PyMongoError, ValueError) as e:
-            logger.error(f"update_package: Error occurred: {str(e)}")
-            return PackageResponse(status=500, message=f"An error occurred: {e}")
+                
+        except (PyMongoError, ValueError, ValidationError) as e:
+            logger.error(f"update_package: A database or validation error occurred: {str(e)}")
+            return PackageResponse(status=500, message=f"A database or validation error occurred: {e}")
         except Exception as e:
             logger.error(f"update_package: Unexpected error: {str(e)}")
             return PackageResponse(status=500, message=f"An unexpected error occurred: {e}")
@@ -982,19 +1355,36 @@ class Mutation:
                         description=updated_package_doc.get("description"),
                         banner_url=updated_package_doc.get("bannerUrl"),
                         theme_url=updated_package_doc.get("themeUrl"),
-                        is_active=updated_package_doc.get("isActive"),
-                        is_deleted=updated_package_doc.get("isDeleted"),
+                        banner_base64=None,  # Not stored in DB, only used for upload
+                        theme_base64=None,   # Not stored in DB, only used for upload
+                        is_active=updated_package_doc.get("isActive", False),
+                        is_deleted=updated_package_doc.get("isDeleted", True),
+                        is_draft=updated_package_doc.get("isDraft", False),
+                        status=None,  # Can be computed later if needed
                         created_at=updated_package_doc.get("createdAt"),
                         updated_at=updated_package_doc.get("updatedAt"),
                         created_by=updated_package_doc.get("createdBy"),
                         updated_by=updated_package_doc.get("updatedBy"),
-                        course_ids=updated_package_doc.get("course_ids"),
-                        price=updated_package_doc.get("price", 0.0),
-                        telegram_id=updated_package_doc.get("telegram_id", []),
                         deleted_at=updated_package_doc.get("deletedAt"),
                         deleted_by=updated_package_doc.get("deletedBy"),
-                        is_draft=updated_package_doc.get("isDraft"),
-                        faqs=[FaqType(**doc) for doc in updated_package_doc.get("faqs", [])]
+                        price_details=[
+                            PriceType(
+                                period=price.get("period"),
+                                actual_price=price.get("actualPrice", 0.0),
+                                price=price.get("price", 0.0),
+                                gst=price.get("gst", 0.0),
+                                totalprice=price.get("totalprice",0.0)
+                            ) for price in updated_package_doc.get("price_details", [])
+                        ],
+                        course_ids=updated_package_doc.get("course_ids", []),
+                        course_details=None,  # Needs population separately
+                        telegram_id=updated_package_doc.get("telegram_id", []),
+                        faqs=[
+                            FaqType(
+                                question=faq.get("question"),
+                                answer=faq.get("answer")
+                            ) for faq in updated_package_doc.get("faqs", [])
+                        ]
                     )
                 )
                 logger.info(f"delete_package: Successfully deleted package with id {package_id}")
