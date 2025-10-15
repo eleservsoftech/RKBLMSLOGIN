@@ -110,3 +110,20 @@ class PackageModel(BaseModel):
         populate_by_name = True
         arbitrary_types_allowed = True
         exclude_none = True
+
+# --- Course progress (one course) ---
+class CourseProgressModel(BaseModel):
+    course_id: str
+    course_view_percent: float = 0.0  # default 0%
+    certificate_sent: bool = False  # Added per course
+
+class PurchasedModel(BaseModel):
+    id: Optional[str] = Field(alias="_id", default=None)
+    user_id: str
+    name: str
+    email: EmailStr
+    phone: str
+    package_id: Optional[str] = None  # None if single course
+    courses: List[CourseProgressModel]
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

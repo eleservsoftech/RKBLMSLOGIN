@@ -37,6 +37,7 @@ from db import (
     usertypes_collection,
     packages_collection,
     courses_collection,
+    purchased_collection,
    
 )
 # ... (existing imports)
@@ -226,6 +227,29 @@ class PackageBundleResponse:
     status: int
     message: str
     data: Optional[PackageBundleType] = None
+
+@strawberry.type
+class PurchasedCourse:
+    course_id: str
+    course_view_percent: float
+    certificate_sent: bool
+
+@strawberry.type
+class PurchaseData:
+    purchase_id: str
+    user_id: str
+    name: str
+    email: str
+    phone: str
+    package_id: Optional[str]
+    courses: List[PurchasedCourse]
+    created_at: datetime
+    updated_at: datetime
+
+@strawberry.input
+class CourseProgressInput:
+    course_id: str
+    course_view_percent: float
 
 # Helper function to fetch course details
 async def get_course_details_by_ids(course_ids: List[str]) -> List[dict]:
@@ -1399,6 +1423,144 @@ class Mutation:
         except Exception as e:
             logger.error(f"delete_package: Unexpected error: {str(e)}")
             return PackageResponse(status=500, message=f"An unexpected error occurred: {e}")
+
+    @strawberry.mutation
+    async def create_purchase(
+        self,
+        user_id: str,
+        name: str,
+        email: str,
+        phone: str,
+        courses: List[CourseProgressInput],
+        package_id: Optional[str] = None
+    ) -> str:
+
+        # Convert courses to dicts with certificate_sent default
+        courses_data = [
+            {**course.__dict__, "certificate_sent": False} for course in courses
+        ]
+
+        logger.info(f"Creating purchase for user_id={user_id}, package_id={package_id}")
+
+        # Package purchase
+        if package_id:
+            existing = await purchased_collection.find_one({
+                "user_id": user_id,
+                "package_id": package_id
+            })
+            if existing:
+                logger.info(f"Existing package found for user {user_id}, updating courses")
+                existing_courses = {c["course_id"]: c for c in existing["courses"]}
+                for course in courses_data:
+                    existing_courses[course["course_id"]] = course
+                await purchased_collection.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {
+                        "courses": list(existing_courses.values()),
+                        "name": name,
+                        "email": email,
+                        "phone": phone,
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+                return str(existing["_id"])
+
+            new_purchase = {
+                "user_id": user_id,
+                "name": name,
+                "email": email,
+                "phone": phone,
+                "package_id": package_id,
+                "courses": courses_data,
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            result = await purchased_collection.insert_one(new_purchase)
+            logger.info(f"New package purchase created with id={result.inserted_id}")
+            return str(result.inserted_id)
+
+        # Single course purchase
+        inserted_ids = []
+        for course in courses_data:
+            existing = await purchased_collection.find_one({
+                "user_id": user_id,
+                "package_id": None,
+                "courses": {"$elemMatch": {"course_id": course["course_id"]}}
+            })
+            if existing:
+                logger.info(f"Updating existing course {course['course_id']} for user {user_id}")
+                await purchased_collection.update_one(
+                    {"_id": existing["_id"], "courses.course_id": course["course_id"]},
+                    {"$set": {
+                        "courses.$.course_view_percent": course["course_view_percent"],
+                        "courses.$.certificate_sent": course["certificate_sent"],
+                        "name": name,
+                        "email": email,
+                        "phone": phone,
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+                inserted_ids.append(str(existing["_id"]))
+            else:
+                new_purchase = {
+                    "user_id": user_id,
+                    "name": name,
+                    "email": email,
+                    "phone": phone,
+                    "package_id": None,
+                    "courses": [course],
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                result = await purchased_collection.insert_one(new_purchase)
+                logger.info(f"New single course purchase created with id={result.inserted_id}")
+                inserted_ids.append(str(result.inserted_id))
+
+        return ", ".join(inserted_ids)
+
+
+    @strawberry.mutation
+    async def update_course_progress(
+        self,
+        purchase_id: str,
+        course_id: str,
+        view_percent: float,
+        certificate_sent: Optional[bool] = None
+    ) -> str:
+        """
+        Updates course progress (view_percent) and optionally certificate_sent
+        for a specific course in a user's purchase.
+        """
+
+        logger.info(f"Updating course progress: purchase_id={purchase_id}, course_id={course_id}")
+
+        # Check if purchase exists
+        purchase = await purchased_collection.find_one({"_id": ObjectId(purchase_id)})
+        if not purchase:
+            logger.warning(f"Purchase with id={purchase_id} not found")
+            return f"Purchase with id={purchase_id} does not exist."
+
+        # Prepare update data
+        update_data = {
+            "courses.$[elem].course_view_percent": view_percent,
+            "updated_at": datetime.utcnow()
+        }
+        if certificate_sent is not None:
+            update_data["courses.$[elem].certificate_sent"] = certificate_sent
+
+        # Perform the update with array_filters
+        result = await purchased_collection.update_one(
+            {"_id": ObjectId(purchase_id)},
+            {"$set": update_data},
+            array_filters=[{"elem.course_id": course_id}]
+        )
+
+        if result.modified_count == 0:
+            logger.info(f"No changes made for course {course_id} in purchase {purchase_id}")
+            return "No course found or no changes made."
+        
+        logger.info(f"Course progress updated successfully for course {course_id} in purchase {purchase_id}")
+        return "Course progress updated successfully."
 
 # Create the schema
 schema = strawberry.Schema(query=Query, mutation=Mutation)
