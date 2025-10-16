@@ -4,7 +4,7 @@ import base64
 import uuid
 import os
 from PIL import Image
-from typing import List, Optional, Union
+from typing import List, Optional, Union,Dict
 from datetime import datetime, timedelta
 from bson import ObjectId
 from pymongo.errors import PyMongoError
@@ -96,6 +96,13 @@ class CourseDetailsType:
 class FaqInput:
     question: str
     answer: str
+
+@strawberry.input
+class PurchaseFilterInput:
+    user_id: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    admin_analysis: Optional[bool] = False
 
 @strawberry.type
 class FaqType:
@@ -251,6 +258,65 @@ class CourseProgressInput:
     course_id: str
     course_view_percent: float
 
+@strawberry.type
+class CourseOutput:
+    course_id: str
+    course_view_percent: float
+    certificate_sent: bool
+
+@strawberry.type
+class PurchaseOutput:
+    package_id: Optional[str]
+    courses: List[CourseOutput]
+    created_at: datetime
+
+@strawberry.type
+class UserPurchaseOutput:
+    user_id: str
+    purchases: List[PurchaseOutput]
+
+@strawberry.type
+class AdminAnalysisOutput:
+    total_users: int
+    total_purchases: int
+    total_courses: int
+    completed_courses: int
+    certificate_sent_true: int
+    certificate_sent_false: int
+    most_purchased_course: Optional[str]
+    most_purchased_package: Optional[str]
+
+@strawberry.type
+class AllPurchaseOutput:
+    all_purchases: List[PurchaseOutput]
+
+@strawberry.type
+class UserListResponse:
+    total_count: int
+    active_count: int
+    users: List[UserType]
+
+@strawberry.type
+class StatusCountType:
+    status: str
+    count: int
+@strawberry.type
+class CourseListResponse:
+    total_count: int
+    status_counts: List[StatusCountType]
+    courses: List[CourseDetailsType]
+
+@strawberry.type
+class PackageStatusCountType:
+    status: str
+    count: int
+
+@strawberry.type
+class PackageCountResponse:
+    total_count: int = strawberry.field(name="totalCount")
+    status_counts: List[PackageStatusCountType] = strawberry.field(name="statusCounts")
+    packages: List[PackageDetailsType] = strawberry.field(name="packages")
+
 # Helper function to fetch course details
 async def get_course_details_by_ids(course_ids: List[str]) -> List[dict]:
     """Fetches course documents from the database based on a list of string IDs."""
@@ -310,29 +376,71 @@ async def delete_previous_file(file_path: Optional[str]):
 @strawberry.type
 class Query:
     @strawberry.field
-    def all_users(self) -> List[UserType]:
+    async def all_users(self) -> UserListResponse:
         logger.info("Entering all_users query")
         try:
-            users = list(users_collection.find({"is_deleted": False}))
-            result = [
-                UserType(
-                    id=str(user["_id"]),
-                    name=user["name"],
-                    email=user["email"],
-                    phone=user["phone"],
-                    usertype_id=str(user["usertype_id"]),
-                    is_active=user["is_active"],
-                    is_deleted=user["is_deleted"],
-                    created_at=user["created_at"]
-                ) for user in users
-            ]
-            logger.info(f"all_users: Successfully fetched {len(result)} users")
-            return result
-        except PyMongoError as e:
+            # Flexible filter for isDeleted
+            query_filter = {
+                "$or": [
+                    {"isDeleted": False},
+                    {"isDeleted": {"$exists": False}},
+                    {"isDeleted": "False"},
+                ]
+            }
+
+            users_cursor = users_collection.find(query_filter)
+            users_list = []
+
+            async for user in users_cursor:
+                # If createdAt is missing or None, skip this user
+                if not user.get("createdAt"):
+                    logger.warning(f"Skipping user {user.get('_id')} - missing createdAt")
+                    continue
+
+                try:
+                    users_list.append(
+                        UserType(
+                            id=str(user.get("_id", "")),
+                            name=user.get("name", ""),
+                            email=user.get("email", ""),
+                            phone=user.get("phone", ""),
+                            usertype_id=str(user.get("usertype_id", "")),
+                            usertype=user.get("usertype", ""),
+                            is_active=bool(user.get("isActive", False)),
+                            is_deleted=bool(user.get("isDeleted", False)),
+                            created_at=user.get("createdAt"),
+                        )
+                    )
+                except Exception as inner_err:
+                    logger.error(f"Skipping user {user.get('_id')} due to error: {inner_err}")
+                    continue
+
+            # If any issue causes empty data, handle gracefully
+            if not users_list:
+                logger.warning("No valid users found (possibly missing createdAt field)")
+                return UserListResponse(total_count=0, active_count=0, users=[])
+
+            # Count totals safely
+            total_count = await users_collection.count_documents(query_filter)
+            active_count = await users_collection.count_documents(
+                {**query_filter, "isActive": True}
+            )
+
+            logger.info(
+                f"all_users: fetched {len(users_list)} users | total={total_count} | active={active_count}"
+            )
+
+            return UserListResponse(
+                total_count=total_count,
+                active_count=active_count,
+                users=users_list,
+            )
+
+        except Exception as e:
             logger.error(f"all_users: MongoDB Error: {str(e)}")
             print(f"MongoDB Error: {e}")
-            return []
-
+            return UserListResponse(total_count=0, active_count=0, users=[])
+        
     @strawberry.field
     def all_user_types(self) -> List[UserTypeType]:
         logger.info("Entering all_user_types query")
@@ -404,129 +512,8 @@ class Query:
             logger.error(f"all_packages: MongoDB Error: {str(e)}")
             print(f"MongoDB Error: {e}")
             return []
-
-    # @strawberry.field
-    # async def get_packages(self, created_by: Optional[str] = None) -> List[PackageDetailsType]:
-    #     """Retrieves a list of packages, optionally filtered by the creator."""
-    #     logger.info(f"Entering get_packages with created_by: {created_by}")
-    #     try:
-    #         query_filter = {}
-    #         if created_by:
-    #             creator_or = [{"createdBy": created_by}]
-    #             if ObjectId.is_valid(created_by):
-    #                 creator_or.append({"createdBy": ObjectId(created_by)})
-    #             query_filter["$or"] = creator_or
-    #         else:
-    #             query_filter["isDeleted"] = False
-
-    #         # CORRECTED: Added 'await' to get the list of packages
-    #         packages_cursor = packages_collection.find(query_filter)
-    #         packages = await packages_cursor.to_list(length=None)
-
-    #         if not packages:
-    #             logger.info("get_packages: No packages found")
-    #             return []
-
-    #         result_packages = []
-    #         for pkg in packages:
-    #             # --- 1. Fetch Course Details ---
-    #             course_details_list = []
-    #             if pkg.get("course_ids"):
-    #                 found_courses_data = await get_course_details_by_ids(pkg["course_ids"])
-    #                 print('found_courses_data')
-    #                 print(found_courses_data)
-    #                 # Map the raw data to the CourseDetailsType for the response
-    #                 course_details_list = [
-    #                     CourseDetailsType(
-    #                         id=str(course["_id"]),
-    #                         title=course.get("title", ""),
-    #                         description=course.get("description"),
-    #                         thumbnail=course.get("thumbnail"),
-    #                         hls=course.get("hls"),
-    #                         language=course.get("language"),
-    #                         desktop_available=course.get("desktopAvailable"),
-    #                         created_by=str(course.get("createdBy")) if course.get("createdBy") else None,
-    #                         creation_stage=course.get("creationStage"),
-    #                         publish_status=course.get("publishStatus"),
-    #                         is_deleted=course.get("isDeleted"),
-    #                         deleted_by=course.get("deletedBy"),
-    #                         deleted_at=course.get("deletedAt"),
-    #                         created_at=course.get("createdAt")
-    #                     )
-    #                     for course in found_courses_data
-    #                 ]
-
-    #             # --- 2. Convert Banner to Base64 ---
-    #             banner_base64_data = None
-    #             if pkg.get("bannerUrl"):
-    #                 # CORRECTED: Added "static" back to the path
-    #                 file_path = os.path.normpath(os.path.join(pkg["bannerUrl"].lstrip('/')))
-    #                 try:
-    #                     with open(file_path, "rb") as image_file:
-    #                         banner_base64_data = base64.b64encode(image_file.read()).decode('utf-8')
-    #                 except FileNotFoundError:
-    #                     logger.warning(f"get_packages: Banner file not found at {file_path}")
-    #                     print(f"Warning: Banner file not found at {file_path}")
-    #                 except Exception as e:
-    #                     logger.error(f"get_packages: Error reading banner file: {str(e)}")
-    #                     print(f"Error reading banner file: {e}")
-                
-    #             # --- 3. Convert Theme to Base64 ---
-    #             theme_base64_data = None
-    #             if pkg.get("themeUrl"):
-    #                 # CORRECTED: Added "static" back to the path
-    #                 file_path = os.path.normpath(os.path.join(pkg["themeUrl"].lstrip('/')))
-    #                 try:
-    #                     with open(file_path, "rb") as image_file:
-    #                         theme_base64_data = base64.b64encode(image_file.read()).decode('utf-8')
-    #                 except FileNotFoundError:
-    #                     logger.warning(f"get_packages: Theme file not found at {file_path}")
-    #                     print(f"Warning: Theme file not found at {file_path}")
-    #                 except Exception as e:
-    #                     logger.error(f"get_packages: Error reading theme file: {str(e)}")
-    #                     print(f"Error reading theme file: {e}")
-
-    #             # --- 4. Format FAQs ---
-    #             response_faqs = []
-    #             if pkg.get("faqs"):
-    #                 response_faqs = [
-    #                     FaqType(question=f.get('question'), answer=f.get('answer'))
-    #                     for f in pkg.get("faqs", [])
-    #                 ]
-
-    #             # Create the response object with all fields, including the new ones
-    #             package_response = PackageDetailsType(
-    #                 id=str(pkg["_id"]),
-    #                 title=pkg.get("title", ""),
-    #                 description=pkg.get("description"),
-    #                 banner_url=pkg.get("bannerUrl"),
-    #                 theme_url=pkg.get("themeUrl"),
-    #                 banner_base64=banner_base64_data,  # Now returns the Base64 data
-    #                 theme_base64=theme_base64_data, # New: Returns the Base64 data for the theme
-    #                 is_active=pkg.get("isActive"),
-    #                 is_deleted=pkg.get("isDeleted"),
-    #                 is_draft=pkg.get("isDraft"),
-    #                 created_at=pkg.get("createdAt"),
-    #                 updated_at=pkg.get("updatedAt"),
-    #                 created_by=pkg.get("createdBy"),
-    #                 updated_by=pkg.get("updatedBy"),
-    #                 price=pkg.get("price", 0.0),
-    #                 course_ids=pkg.get("course_ids", []),
-    #                 course_details=course_details_list,  # New: Returns full course objects
-    #                 telegram_id=pkg.get("telegram_id", []),
-    #                 faqs=response_faqs,
-    #                 deleted_at=None,
-    #                 deleted_by=None,
-    #             )
-    #             result_packages.append(package_response)
-
-    #         logger.info(f"get_packages: Successfully fetched {len(result_packages)} packages")
-    #         return result_packages
-        
-    #     except Exception as e:
-    #         logger.error(f"get_packages: An unexpected error occurred: {str(e)}")
-    #         print(f"An unexpected error occurred in get_packages: {e}")
-    #         return []
+    
+    
 
     @strawberry.field
     async def get_packages(
@@ -665,7 +652,254 @@ class Query:
             logger.error(f"get_packages: An unexpected error occurred: {str(e)}")
             print(f"An unexpected error occurred in get_packages: {e}")
             return []
+        
+    @strawberry.field
+    async def get_purchase_data(
+        self,
+        filter: Optional[PurchaseFilterInput] = None
+    ) -> Optional[
+        AdminAnalysisOutput | UserPurchaseOutput | AllPurchaseOutput
+    ]:
+        query = {}
+        if filter:
+            if filter.user_id:
+                query["user_id"] = filter.user_id
+            if filter.start_date and filter.end_date:
+                query["created_at"] = {
+                    "$gte": filter.start_date,
+                    "$lte": filter.end_date
+                }
 
+        purchases = await purchased_collection.find(query).to_list(None)
+
+        # ✅ 1. Admin analytics
+        if filter and filter.admin_analysis:
+            total_users = len({p["user_id"] for p in purchases})
+            total_purchases = len(purchases)
+            all_courses = [course for p in purchases for course in p["courses"]]
+            total_courses = len(all_courses)
+
+            completed_courses = sum(1 for c in all_courses if c.get("course_view_percent", 0) >= 100)
+            certificate_sent_true = sum(1 for c in all_courses if c.get("certificate_sent") == True)
+            certificate_sent_false = total_courses - certificate_sent_true
+
+            from collections import Counter
+            course_counter = Counter(c["course_id"] for c in all_courses)
+            package_counter = Counter(p["package_id"] for p in purchases if p.get("package_id"))
+
+            most_purchased_course = course_counter.most_common(1)[0][0] if course_counter else None
+            most_purchased_package = package_counter.most_common(1)[0][0] if package_counter else None
+
+            return AdminAnalysisOutput(
+                total_users=total_users,
+                total_purchases=total_purchases,
+                total_courses=total_courses,
+                completed_courses=completed_courses,
+                certificate_sent_true=certificate_sent_true,
+                certificate_sent_false=certificate_sent_false,
+                most_purchased_course=most_purchased_course,
+                most_purchased_package=most_purchased_package
+            )
+
+        # ✅ 2. User purchases
+        if filter and filter.user_id:
+            user_purchases = [
+                PurchaseOutput(
+                    package_id=p.get("package_id"),
+                    courses=[
+                        CourseOutput(
+                            course_id=c["course_id"],
+                            course_view_percent=c.get("course_view_percent", 0.0),
+                            certificate_sent=c.get("certificate_sent", False)
+                        ) for c in p["courses"]
+                    ],
+                    created_at=p["created_at"]
+                )
+                for p in purchases
+            ]
+            return UserPurchaseOutput(
+                user_id=filter.user_id,
+                purchases=user_purchases
+            )
+
+        # ✅ 3. All purchases
+        all_purchases = [
+            PurchaseOutput(
+                package_id=p.get("package_id"),
+                courses=[
+                    CourseOutput(
+                        course_id=c["course_id"],
+                        course_view_percent=c.get("course_view_percent", 0.0),
+                        certificate_sent=c.get("certificate_sent", False)
+                    ) for c in p["courses"]
+                ],
+                created_at=p["created_at"]
+            )
+            for p in purchases
+        ]
+        return AllPurchaseOutput(all_purchases=all_purchases)
+    
+    @strawberry.field
+    async def all_courses(self) -> CourseListResponse:
+        logger.info("Entering all_courses query")
+
+        try:
+            query_filter = {
+                "$or": [
+                    {"isDeleted": False},
+                    {"isDeleted": {"$exists": False}},
+                    {"isDeleted": "False"},
+                ]
+            }
+
+            courses_cursor = courses_collection.find(query_filter)
+            courses_list = []
+            status_counter = {}
+
+            async for course in courses_cursor:
+                # --- Get publish status from possible field variants ---
+                publish_status = (
+                    course.get("publishStatus")
+                    or course.get("PublishStatus")
+                    or course.get("status")
+                    or course.get("Status")
+                    or ""
+                ).strip()
+
+                # Default if somehow still missing
+                if not publish_status:
+                    publish_status = "Unknown"
+
+                # Count status
+                status_counter[publish_status] = status_counter.get(publish_status, 0) + 1
+
+                # Skip if createdAt missing
+                if not course.get("createdAt"):
+                    logger.warning(f"Skipping course {course.get('_id')} - missing createdAt")
+                    continue
+
+                try:
+                    courses_list.append(
+                        CourseDetailsType(
+                            id=str(course.get("_id", "")),
+                            title=str(course.get("title") or course.get("Title") or ""),
+                            description=str(course.get("description") or course.get("Description") or ""),
+                            thumbnail=str(course.get("thumbnail") or course.get("Thumbnail") or ""),
+                            hls=str(course.get("hls") or course.get("HLS") or ""),
+                            language=str(course.get("language") or course.get("Language") or ""),
+                            desktop_available=bool(course.get("desktopAvailable", True)),
+                            created_by=str(course.get("createdBy") or course.get("CreatedBy") or ""),
+                            creation_stage=str(course.get("creationStage") or course.get("CreationStage") or ""),
+                            publish_status=publish_status,
+                            is_deleted=bool(course.get("isDeleted", False)),
+                            deleted_by=str(course.get("deletedBy") or ""),
+                            deleted_at=course.get("deletedAt"),
+                            created_at=course.get("createdAt"),
+                        )
+                    )
+                except Exception as inner_err:
+                    logger.error(f"Skipping course {course.get('_id')} due to error: {inner_err}")
+                    continue
+
+            total_count = await courses_collection.count_documents(query_filter)
+
+            # Convert dict → list of StatusCountType for GraphQL
+            status_counts = [
+                StatusCountType(status=k, count=v) for k, v in status_counter.items()
+            ]
+
+            logger.info(
+                f"all_courses: fetched {len(courses_list)} courses | total={total_count} | status_counts={status_counter}"
+            )
+
+            return CourseListResponse(
+                total_count=total_count,
+                status_counts=status_counts,
+                courses=courses_list,
+            )
+
+        except Exception as e:
+            logger.error(f"all_courses: MongoDB Error: {str(e)}")
+            print(f"MongoDB Error: {e}")
+            return CourseListResponse(total_count=0, status_counts=[], courses=[])
+
+
+    @strawberry.field
+    async def get_package_counts() -> PackageCountResponse:
+        """
+        Returns total package count, status-wise counts, and package summaries
+        using PackageDetailsType.
+        """
+        try:
+            query_filter = {
+                "$or": [
+                    {"isDeleted": False},
+                    {"isDeleted": {"$exists": False}},
+                    {"isDeleted": "False"},
+                ]
+            }
+
+            packages_cursor = packages_collection.find(query_filter)
+            status_counter = {}
+            total_count = 0
+            packages_list = []
+
+            async for pkg in packages_cursor:
+                total_count += 1
+
+                # --- Status ---
+                status = (pkg.get("status") or pkg.get("Status") or "Unknown").strip()
+                if not status:
+                    status = "Unknown"
+                status_counter[status] = status_counter.get(status, 0) + 1
+
+                # --- Prepare PackageDetailsType (minimal fields for counts view) ---
+                packages_list.append(
+                    PackageDetailsType(
+                        id=str(pkg.get("_id", "")),
+                        title=pkg.get("title", ""),
+                        description=pkg.get("description", ""),
+                        course_ids=pkg.get("course_ids", []),
+                        status=status,
+                        is_active=pkg.get("isActive", False),
+                        is_deleted=pkg.get("isDeleted", False),
+                        is_draft=pkg.get("isDraft", False),
+                        created_at=pkg.get("createdAt", None),
+                        updated_at=pkg.get("updatedAt", None),
+                        created_by=pkg.get("createdBy", None),
+                        updated_by=pkg.get("updatedBy", None),
+                        deleted_at=pkg.get("deletedAt", None),
+                        deleted_by=pkg.get("deletedBy", None),
+                        # Optional fields remain None
+                        banner_url=None,
+                        theme_url=None,
+                        banner_base64=None,
+                        theme_base64=None,
+                        price_details=None,
+                        course_details=None,
+                        telegram_id=None,
+                        faqs=None
+                    )
+                )
+
+            # Convert dict → list of Strawberry types for status counts
+            status_counts_list = [
+                PackageStatusCountType(status=k, count=v) for k, v in status_counter.items()
+            ]
+
+            logger.info(
+                f"get_package_counts: total={total_count}, status_counts={status_counter}, packages={len(packages_list)}"
+            )
+
+            return PackageCountResponse(
+                total_count=total_count,
+                status_counts=status_counts_list,
+                packages=packages_list
+            )
+
+        except Exception as e:
+            logger.error(f"get_package_counts: MongoDB Error: {str(e)}")
+            return PackageCountResponse(total_count=0, status_counts=[], packages=[])
 # --- GraphQL Mutations ---
 @strawberry.type
 class Mutation:
