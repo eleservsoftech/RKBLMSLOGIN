@@ -4,7 +4,7 @@ import base64
 import uuid
 import os
 from PIL import Image
-from typing import List, Optional, Union,Dict
+from typing import List, Optional, Union,Dict,Any,Set
 from datetime import datetime, timedelta
 from bson import ObjectId
 from pymongo.errors import PyMongoError
@@ -15,6 +15,8 @@ import jwt
 import re
 import logging
 from logging.handlers import TimedRotatingFileHandler
+from collections import Counter
+from datetime import datetime, timezone, MINYEAR
 
 # Set up logging with daily rotation
 logger = logging.getLogger('MutationsLogger')
@@ -275,6 +277,7 @@ class UserPurchaseOutput:
     user_id: str
     purchases: List[PurchaseOutput]
 
+# ======== NEW: AdminAnalysisOutput expanded with users + details ========
 @strawberry.type
 class AdminAnalysisOutput:
     total_users: int
@@ -283,8 +286,18 @@ class AdminAnalysisOutput:
     completed_courses: int
     certificate_sent_true: int
     certificate_sent_false: int
+
+    # NEW: user details
+    certificate_sent_true_users: List[UserType]
+    certificate_sent_false_users: List[UserType]
+
+    # previous ids (kept for backward compat)
     most_purchased_course: Optional[str]
     most_purchased_package: Optional[str]
+
+    # NEW: hydrated details
+    most_purchased_course_details: Optional[CourseDetailsType]
+    most_purchased_package_details: Optional[PackageDetailsType]
 
 @strawberry.type
 class AllPurchaseOutput:
@@ -295,6 +308,9 @@ class UserListResponse:
     total_count: int
     active_count: int
     users: List[UserType]
+    ## new added
+    deleted_count: int
+    deleted_users: List[UserType]
 
 @strawberry.type
 class StatusCountType:
@@ -316,6 +332,72 @@ class PackageCountResponse:
     total_count: int = strawberry.field(name="totalCount")
     status_counts: List[PackageStatusCountType] = strawberry.field(name="statusCounts")
     packages: List[PackageDetailsType] = strawberry.field(name="packages")
+
+def _to_maybe_object_id(s: str):
+    """Try coercing a string id to ObjectId; fall back to the original string."""
+    try:
+        return ObjectId(s)
+    except Exception:
+        return s
+
+def _map_user_doc_to_type(doc: Dict[str, Any]) -> UserType:
+    return UserType(
+        id=str(doc.get("_id")),
+        name=doc.get("name") or "",
+        email=doc.get("email") or "",
+        phone=doc.get("phone") or "",
+        usertype_id=str(doc.get("usertype_id") or ""),
+        usertype=doc.get("usertype") or "",
+        is_active=bool(doc.get("isActive", True)),
+        is_deleted=bool(doc.get("isDeleted", False)),
+        created_at=doc.get("createdAt") or doc.get("created_at") or datetime.utcnow(),
+    )
+
+def _map_course_doc_to_type(doc: Dict[str, Any]) -> CourseDetailsType:
+    return CourseDetailsType(
+        id=str(doc.get("_id")),
+        title=doc.get("title") or "",
+        description=doc.get("description"),
+        thumbnail=doc.get("thumbnail"),
+        hls=doc.get("hls"),
+        language=doc.get("language"),
+        desktop_available=bool(doc.get("desktopAvailable", True)),
+        created_by=doc.get("createdBy"),
+        creation_stage=doc.get("creationStage"),
+        publish_status=doc.get("publishStatus"),
+        is_deleted=bool(doc.get("isDeleted", False)),
+        deleted_by=doc.get("deletedBy"),
+        deleted_at=doc.get("deletedAt"),
+        created_at=doc.get("createdAt") or doc.get("created_at") or datetime.utcnow(),
+    )
+
+def _map_package_doc_to_type(doc: Dict[str, Any]) -> PackageDetailsType:
+    # NOTE: nested types like PriceType/FaqType/course_details can be filled later if needed.
+    return PackageDetailsType(
+        id=str(doc.get("_id")),
+        title=doc.get("title") or "",
+        description=doc.get("description"),
+        banner_url=doc.get("bannerUrl"),
+        theme_url=doc.get("themeUrl"),
+        banner_base64=doc.get("banner_base64"),
+        theme_base64=doc.get("theme_base64"),
+        is_active=bool(doc.get("isActive", True)),
+        is_deleted=bool(doc.get("isDeleted", False)),
+        is_draft=bool(doc.get("isDraft", False)),
+        status=doc.get("status"),
+        created_at=doc.get("createdAt") or doc.get("created_at") or datetime.utcnow(),
+        updated_at=doc.get("updatedAt") or doc.get("updated_at") or datetime.utcnow(),
+        created_by=doc.get("createdBy"),
+        updated_by=doc.get("updatedBy"),
+        deleted_at=doc.get("deletedAt"),
+        deleted_by=doc.get("deletedBy"),
+        price_details=doc.get("price_details"),
+        course_ids=[str(x) for x in (doc.get("course_ids") or [])],
+        course_details=None,   # hydrate if you want (out of scope here)
+        telegram_id=doc.get("telegram_id"),
+        faqs=doc.get("faqs"),
+    )
+
 
 # Helper function to fetch course details
 async def get_course_details_by_ids(course_ids: List[str]) -> List[dict]:
@@ -375,71 +457,149 @@ async def delete_previous_file(file_path: Optional[str]):
 # --- GraphQL Queries ---
 @strawberry.type
 class Query:
-    @strawberry.field
-    async def all_users(self) -> UserListResponse:
+    @strawberry.field(name="allUsers")
+    async def all_users(
+        self,
+        active: Optional[bool] = None,          # None -> all; True -> only active; False -> only inactive (explicit)
+        is_deleted: Optional[bool] = None       # None -> both; True -> only deleted; False -> only non-deleted (for users list only)
+    ) -> UserListResponse:
+        """
+        - Counts are computed over non-deleted users (total_count, active_count), plus:
+          deleted_count: number of deleted users.
+        - users list:
+            * filtered by `active` as requested
+                - active=True  -> users with isActive truthy
+                - active=False -> users that EXPLICITLY have isActive present AND falsy
+                - active=None  -> ignore isActive for the list
+            * optional `is_deleted` filter for the list (does NOT change counts)
+        - deleted_users list: always returned (all deleted users), sorted by createdAt desc.
+        """
         logger.info("Entering all_users query")
         try:
-            # Flexible filter for isDeleted
-            query_filter = {
-                "$or": [
-                    {"isDeleted": False},
-                    {"isDeleted": {"$exists": False}},
-                    {"isDeleted": "False"},
-                ]
+            base_projection = {
+                "_id": 1,
+                "name": 1,
+                "email": 1,
+                # phone variants
+                "phone": 1, "mobile": 1, "contact": 1, "phoneNumber": 1,
+                # roles/types
+                "usertype": 1, "usertype_id": 1,
+                # flags
+                "isActive": 1, "isDeleted": 1,
+                # timestamps
+                "createdAt": 1, "created_at": 1, "updatedAt": 1,
             }
 
-            users_cursor = users_collection.find(query_filter)
-            users_list = []
+            # Pull ALL users once (both deleted and non-deleted), so we can form all views consistently.
+            cursor = users_collection.find({}, projection=base_projection)
 
-            async for user in users_cursor:
-                # If createdAt is missing or None, skip this user
-                if not user.get("createdAt"):
-                    logger.warning(f"Skipping user {user.get('_id')} - missing createdAt")
-                    continue
+            def norm_bool(v) -> bool:
+                if isinstance(v, bool): return v
+                if isinstance(v, (int, float)): return v == 1
+                if isinstance(v, str): return v.strip().lower() in {"true", "1", "yes", "y", "active"}
+                return False
 
+            def has_is_active_field(doc: Dict[str, Any]) -> bool:
+                # True only if the key exists in the document
+                return "isActive" in doc
+
+            def pick_phone(u: dict) -> str:
+                return str(u.get("phone") or u.get("mobile") or u.get("contact") or u.get("phoneNumber") or "")
+
+            def stringify_id(v) -> str:
                 try:
-                    users_list.append(
-                        UserType(
-                            id=str(user.get("_id", "")),
-                            name=user.get("name", ""),
-                            email=user.get("email", ""),
-                            phone=user.get("phone", ""),
-                            usertype_id=str(user.get("usertype_id", "")),
-                            usertype=user.get("usertype", ""),
-                            is_active=bool(user.get("isActive", False)),
-                            is_deleted=bool(user.get("isDeleted", False)),
-                            created_at=user.get("createdAt"),
-                        )
-                    )
-                except Exception as inner_err:
-                    logger.error(f"Skipping user {user.get('_id')} due to error: {inner_err}")
-                    continue
+                    from bson import ObjectId
+                    if isinstance(v, ObjectId):
+                        return str(v)
+                except Exception:
+                    pass
+                return "" if v is None else str(v)
 
-            # If any issue causes empty data, handle gracefully
-            if not users_list:
-                logger.warning("No valid users found (possibly missing createdAt field)")
-                return UserListResponse(total_count=0, active_count=0, users=[])
+            def safe_dt(*candidates) -> datetime:
+                for x in candidates:
+                    if isinstance(x, datetime):
+                        return x
+                return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-            # Count totals safely
-            total_count = await users_collection.count_documents(query_filter)
-            active_count = await users_collection.count_documents(
-                {**query_filter, "isActive": True}
-            )
+            def to_user_type(doc: Dict[str, Any]) -> UserType:
+                return UserType(
+                    id=str(doc.get("_id", "")),
+                    name=str(doc.get("name") or ""),
+                    email=str(doc.get("email") or ""),
+                    phone=pick_phone(doc),
+                    usertype_id=stringify_id(doc.get("usertype_id")),
+                    usertype=str(doc.get("usertype") or ""),
+                    is_active=norm_bool(doc.get("isActive")),
+                    is_deleted=norm_bool(doc.get("isDeleted")),
+                    created_at=safe_dt(doc.get("createdAt"), doc.get("created_at"), doc.get("updatedAt")),
+                )
+
+            # Load & normalize all docs, and also keep flags for presence checks
+            all_docs: List[Dict[str, Any]] = []
+            async for u in cursor:
+                all_docs.append(u)
+
+            all_users_norm: List[UserType] = [to_user_type(d) for d in all_docs]
+
+            # Split deleted / non-deleted
+            non_deleted_docs = [d for d in all_docs if not norm_bool(d.get("isDeleted"))]
+            deleted_docs = [d for d in all_docs if norm_bool(d.get("isDeleted"))]
+
+            non_deleted_users = [to_user_type(d) for d in non_deleted_docs]
+            deleted_users = [to_user_type(d) for d in deleted_docs]
+
+            # --- Counts ---
+            total_count = len(non_deleted_users)                              # non-deleted
+            active_count = sum(1 for d in non_deleted_docs if norm_bool(d.get("isActive")))  # non-deleted + active
+            deleted_count = len(deleted_users)                                # deleted users
+
+            # --- Build the main 'users' list per args ---
+            # Start from both sets, then apply is_deleted and active filters
+            if is_deleted is True:
+                candidate_docs = deleted_docs
+            elif is_deleted is False:
+                candidate_docs = non_deleted_docs
+            else:
+                candidate_docs = all_docs  # both
+
+            if active is True:
+                # users with isActive truthy (normalize truth)
+                candidate_docs = [d for d in candidate_docs if norm_bool(d.get("isActive"))]
+            elif active is False:
+                # ONLY those that explicitly HAVE the isActive field AND it is falsy
+                candidate_docs = [
+                    d for d in candidate_docs
+                    if has_is_active_field(d) and not norm_bool(d.get("isActive"))
+                ]
+            # else active is None -> no filter on isActive
+
+            users_list = [to_user_type(d) for d in candidate_docs]
+
+            # Sort lists by created_at desc
+            def sort_key(u: UserType):
+                return u.created_at if isinstance(u.created_at, datetime) else datetime(MINYEAR, 1, 1)
+
+            users_list.sort(key=sort_key, reverse=True)
+            deleted_users.sort(key=sort_key, reverse=True)
 
             logger.info(
-                f"all_users: fetched {len(users_list)} users | total={total_count} | active={active_count}"
+                "all_users: returned=%s | total(non-deleted)=%s | active(non-deleted)=%s | deleted=%s | filters: active=%s is_deleted=%s",
+                len(users_list), total_count, active_count, deleted_count, active, is_deleted
             )
 
             return UserListResponse(
                 total_count=total_count,
                 active_count=active_count,
                 users=users_list,
+                deleted_count=deleted_count,
+                deleted_users=deleted_users,
             )
 
         except Exception as e:
             logger.error(f"all_users: MongoDB Error: {str(e)}")
-            print(f"MongoDB Error: {e}")
-            return UserListResponse(total_count=0, active_count=0, users=[])
+            return UserListResponse(
+                total_count=0, active_count=0, users=[], deleted_count=0, deleted_users=[]
+            )
         
     @strawberry.field
     def all_user_types(self) -> List[UserTypeType]:
@@ -657,38 +817,142 @@ class Query:
     async def get_purchase_data(
         self,
         filter: Optional[PurchaseFilterInput] = None
-    ) -> Optional[
-        AdminAnalysisOutput | UserPurchaseOutput | AllPurchaseOutput
-    ]:
-        query = {}
+    ) -> Optional[AdminAnalysisOutput | UserPurchaseOutput | AllPurchaseOutput]:
+
+        query: Dict[str, Any] = {}
         if filter:
             if filter.user_id:
                 query["user_id"] = filter.user_id
             if filter.start_date and filter.end_date:
-                query["created_at"] = {
-                    "$gte": filter.start_date,
-                    "$lte": filter.end_date
-                }
+                query["created_at"] = {"$gte": filter.start_date, "$lte": filter.end_date}
 
+        # Pull all first, then organize consistently
         purchases = await purchased_collection.find(query).to_list(None)
 
-        # ✅ 1. Admin analytics
+        # ------ normalize/defensive defaults + sort purchases by created_at desc ------
+        def _safe_dt(x):
+            return x if isinstance(x, datetime) else datetime.min
+
+        for p in purchases:
+            p.setdefault("courses", [])
+            p.setdefault("package_id", None)
+            p.setdefault("created_at", None)
+
+            # sort courses by course_id for predictability
+            p["courses"] = sorted(
+                (p.get("courses") or []),
+                key=lambda c: str(c.get("course_id", ""))
+            )
+
+        purchases.sort(key=lambda x: _safe_dt(x.get("created_at")), reverse=True)
+
+        # ---------- 1) Admin analytics (ENHANCED + ORGANIZED) ----------
         if filter and filter.admin_analysis:
-            total_users = len({p["user_id"] for p in purchases})
+            total_users = len({p.get("user_id") for p in purchases})
             total_purchases = len(purchases)
-            all_courses = [course for p in purchases for course in p["courses"]]
+            all_courses = [course for p in purchases for course in (p.get("courses") or [])]
             total_courses = len(all_courses)
 
-            completed_courses = sum(1 for c in all_courses if c.get("course_view_percent", 0) >= 100)
-            certificate_sent_true = sum(1 for c in all_courses if c.get("certificate_sent") == True)
+            completed_courses = sum(
+                1 for c in all_courses
+                if float(c.get("course_view_percent", 0) or 0) >= 100.0
+            )
+
+            # certificate boolean counts
+            certificate_sent_true = sum(1 for c in all_courses if bool(c.get("certificate_sent")) is True)
             certificate_sent_false = total_courses - certificate_sent_true
 
-            from collections import Counter
-            course_counter = Counter(c["course_id"] for c in all_courses)
-            package_counter = Counter(p["package_id"] for p in purchases if p.get("package_id"))
+            # Users having any true/false certs
+            users_with_true: Set[str] = set()
+            users_with_false: Set[str] = set()
+            for p in purchases:
+                uid = str(p.get("user_id"))
+                cs = p.get("courses") or []
+                if any(bool(c.get("certificate_sent")) is True for c in cs):
+                    users_with_true.add(uid)
+                if any(not bool(c.get("certificate_sent", False)) for c in cs):
+                    users_with_false.add(uid)
 
-            most_purchased_course = course_counter.most_common(1)[0][0] if course_counter else None
-            most_purchased_package = package_counter.most_common(1)[0][0] if package_counter else None
+            def _coerce_list_to_ids(id_set: Set[str]) -> List[Any]:
+                return [_to_maybe_object_id(s) for s in id_set if s]
+
+            true_ids = _coerce_list_to_ids(users_with_true)
+            false_ids = _coerce_list_to_ids(users_with_false)
+
+            certificate_sent_true_users_docs = []
+            if true_ids:
+                certificate_sent_true_users_docs = await users_collection.find(
+                    {"_id": {"$in": true_ids}},
+                    projection={
+                        "_id": 1, "name": 1, "email": 1, "phone": 1, "mobile": 1,
+                        "contact": 1, "phoneNumber": 1, "usertype": 1,
+                        "usertype_id": 1, "userTypeId": 1, "user_type_id": 1,
+                        "isActive": 1, "isDeleted": 1, "createdAt": 1
+                    }
+                ).to_list(None)
+
+            certificate_sent_false_users_docs = []
+            if false_ids:
+                certificate_sent_false_users_docs = await users_collection.find(
+                    {"_id": {"$in": false_ids}},
+                    projection={
+                        "_id": 1, "name": 1, "email": 1, "phone": 1, "mobile": 1,
+                        "contact": 1, "phoneNumber": 1, "usertype": 1,
+                        "usertype_id": 1, "userTypeId": 1, "user_type_id": 1,
+                        "isActive": 1, "isDeleted": 1, "createdAt": 1
+                    }
+                ).to_list(None)
+
+            # map → GraphQL type
+            true_users = [_map_user_doc_to_type(d) for d in certificate_sent_true_users_docs]
+            false_users = [_map_user_doc_to_type(d) for d in certificate_sent_false_users_docs]
+
+            # sort both user lists by created_at desc for consistent ordering
+            def _created_at_safe(u: UserType) -> datetime:
+                return u.created_at if isinstance(u.created_at, datetime) else datetime.min
+
+            true_users.sort(key=_created_at_safe, reverse=True)
+            false_users.sort(key=_created_at_safe, reverse=True)
+
+            # Most purchased course & package (stable tie-break)
+            course_counter = Counter()
+            for c in all_courses:
+                cid = c.get("course_id")
+                if cid:
+                    course_counter[str(cid)] += 1
+
+            package_counter = Counter()
+            for p in purchases:
+                pid = p.get("package_id")
+                if pid:
+                    package_counter[str(pid)] += 1
+
+            def _pick_most_common(counter: Counter) -> Optional[str]:
+                if not counter:
+                    return None
+                # sort by (-count, id) so ties break deterministically by id
+                items = sorted(counter.items(), key=lambda t: (-t[1], t[0]))
+                return items[0][0]
+
+            most_purchased_course = _pick_most_common(course_counter)
+            most_purchased_package = _pick_most_common(package_counter)
+
+            # hydrate details
+            most_purchased_course_details: Optional[CourseDetailsType] = None
+            if most_purchased_course:
+                cdoc = await courses_collection.find_one(
+                    {"_id": _to_maybe_object_id(most_purchased_course)}
+                )
+                if cdoc:
+                    most_purchased_course_details = _map_course_doc_to_type(cdoc)
+
+            most_purchased_package_details: Optional[PackageDetailsType] = None
+            if most_purchased_package:
+                pdoc = await packages_collection.find_one(
+                    {"_id": _to_maybe_object_id(most_purchased_package)}
+                )
+                if pdoc:
+                    most_purchased_package_details = _map_package_doc_to_type(pdoc)
 
             return AdminAnalysisOutput(
                 total_users=total_users,
@@ -697,204 +961,303 @@ class Query:
                 completed_courses=completed_courses,
                 certificate_sent_true=certificate_sent_true,
                 certificate_sent_false=certificate_sent_false,
+                certificate_sent_true_users=true_users,
+                certificate_sent_false_users=false_users,
                 most_purchased_course=most_purchased_course,
-                most_purchased_package=most_purchased_package
+                most_purchased_package=most_purchased_package,
+                most_purchased_course_details=most_purchased_course_details,
+                most_purchased_package_details=most_purchased_package_details,
             )
 
-        # ✅ 2. User purchases
+        # ---------- 2) User purchases (organized) ----------
         if filter and filter.user_id:
             user_purchases = [
                 PurchaseOutput(
                     package_id=p.get("package_id"),
                     courses=[
                         CourseOutput(
-                            course_id=c["course_id"],
-                            course_view_percent=c.get("course_view_percent", 0.0),
-                            certificate_sent=c.get("certificate_sent", False)
-                        ) for c in p["courses"]
+                            course_id=str(c.get("course_id", "")),
+                            course_view_percent=float(c.get("course_view_percent", 0.0) or 0.0),
+                            certificate_sent=bool(c.get("certificate_sent", False)),
+                        )
+                        for c in (p.get("courses") or [])
                     ],
-                    created_at=p["created_at"]
+                    created_at=p.get("created_at"),
                 )
                 for p in purchases
             ]
-            return UserPurchaseOutput(
-                user_id=filter.user_id,
-                purchases=user_purchases
-            )
+            # already sorted by created_at desc above
+            return UserPurchaseOutput(user_id=filter.user_id, purchases=user_purchases)
 
-        # ✅ 3. All purchases
+        # ---------- 3) All purchases (organized) ----------
         all_purchases = [
             PurchaseOutput(
                 package_id=p.get("package_id"),
                 courses=[
                     CourseOutput(
-                        course_id=c["course_id"],
-                        course_view_percent=c.get("course_view_percent", 0.0),
-                        certificate_sent=c.get("certificate_sent", False)
-                    ) for c in p["courses"]
+                        course_id=str(c.get("course_id", "")),
+                        course_view_percent=float(c.get("course_view_percent", 0.0) or 0.0),
+                        certificate_sent=bool(c.get("certificate_sent", False)),
+                    )
+                    for c in (p.get("courses") or [])
                 ],
-                created_at=p["created_at"]
+                created_at=p.get("created_at"),
             )
             for p in purchases
         ]
+        # already sorted by created_at desc above
         return AllPurchaseOutput(all_purchases=all_purchases)
     
-    @strawberry.field
-    async def all_courses(self) -> CourseListResponse:
+    @strawberry.field(name="allCourses")
+    async def all_courses(
+        self,
+        is_deleted: Optional[bool] = None,     # None -> return all details; True/False -> filter details
+        statusCount: Optional[bool] = False,   # if True, compute status counts ONLY on non-deleted
+    ) -> CourseListResponse:
+        """
+        - courses list: respects `is_deleted` filter (None -> all, True -> only deleted, False -> only non-deleted)
+        - totalCount: number of NON-DELETED courses
+        - statusCounts: histogram of publish status for NON-DELETED courses (only when statusCount=True)
+        """
         logger.info("Entering all_courses query")
 
         try:
-            query_filter = {
-                "$or": [
-                    {"isDeleted": False},
-                    {"isDeleted": {"$exists": False}},
-                    {"isDeleted": "False"},
-                ]
+            projection = {
+                "_id": 1,
+                "title": 1, "Title": 1,
+                "description": 1, "Description": 1,
+                "thumbnail": 1, "Thumbnail": 1,
+                "hls": 1, "HLS": 1,
+                "language": 1, "Language": 1,
+                "desktopAvailable": 1,
+                "createdBy": 1, "CreatedBy": 1,
+                "creationStage": 1, "CreationStage": 1,
+                "publishStatus": 1, "PublishStatus": 1, "status": 1, "Status": 1,
+                "isDeleted": 1,
+                "deletedBy": 1,
+                "deletedAt": 1,
+                "createdAt": 1,
+                "created_at": 1,
+                "updatedAt": 1,
             }
 
-            courses_cursor = courses_collection.find(query_filter)
-            courses_list = []
-            status_counter = {}
+            cursor = courses_collection.find({}, projection=projection)
 
-            async for course in courses_cursor:
-                # --- Get publish status from possible field variants ---
-                publish_status = (
-                    course.get("publishStatus")
-                    or course.get("PublishStatus")
-                    or course.get("status")
-                    or course.get("Status")
+            def norm_bool(v) -> bool:
+                if isinstance(v, bool): return v
+                if isinstance(v, (int, float)): return v == 1
+                if isinstance(v, str): return v.strip().lower() in {"true","1","yes","y"}
+                if v is None: return False
+                return False
+
+            def safe_dt(*xs) -> datetime:
+                for x in xs:
+                    if isinstance(x, datetime):
+                        return x
+                return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+            def pick_status(doc: Dict[str, Any]) -> str:
+                s = (
+                    doc.get("publishStatus")
+                    or doc.get("PublishStatus")
+                    or doc.get("status")
+                    or doc.get("Status")
                     or ""
-                ).strip()
+                )
+                s = str(s).strip()
+                return s if s else "Unknown"
 
-                # Default if somehow still missing
-                if not publish_status:
-                    publish_status = "Unknown"
+            def to_course(doc: Dict[str, Any]) -> CourseDetailsType:
+                return CourseDetailsType(
+                    id=str(doc.get("_id", "")),
+                    title=str(doc.get("title") or doc.get("Title") or ""),
+                    description=str(doc.get("description") or doc.get("Description") or ""),
+                    thumbnail=str(doc.get("thumbnail") or doc.get("Thumbnail") or ""),
+                    hls=str(doc.get("hls") or doc.get("HLS") or ""),
+                    language=str(doc.get("language") or doc.get("Language") or ""),
+                    desktop_available=bool(doc.get("desktopAvailable", True)),
+                    created_by=str(doc.get("createdBy") or doc.get("CreatedBy") or ""),
+                    creation_stage=str(doc.get("creationStage") or doc.get("CreationStage") or ""),
+                    publish_status=pick_status(doc),
+                    is_deleted=norm_bool(doc.get("isDeleted")),
+                    deleted_by=str(doc.get("deletedBy") or ""),
+                    deleted_at=doc.get("deletedAt"),
+                    created_at=safe_dt(doc.get("createdAt"), doc.get("created_at"), doc.get("updatedAt")),
+                )
 
-                # Count status
-                status_counter[publish_status] = status_counter.get(publish_status, 0) + 1
+            # Normalize all docs
+            all_courses_norm: List[CourseDetailsType] = []
+            async for c in cursor:
+                all_courses_norm.append(to_course(c))
 
-                # Skip if createdAt missing
-                if not course.get("createdAt"):
-                    logger.warning(f"Skipping course {course.get('_id')} - missing createdAt")
-                    continue
+            # Split once
+            non_deleted = [x for x in all_courses_norm if not x.is_deleted]
+            deleted = [x for x in all_courses_norm if x.is_deleted]
 
-                try:
-                    courses_list.append(
-                        CourseDetailsType(
-                            id=str(course.get("_id", "")),
-                            title=str(course.get("title") or course.get("Title") or ""),
-                            description=str(course.get("description") or course.get("Description") or ""),
-                            thumbnail=str(course.get("thumbnail") or course.get("Thumbnail") or ""),
-                            hls=str(course.get("hls") or course.get("HLS") or ""),
-                            language=str(course.get("language") or course.get("Language") or ""),
-                            desktop_available=bool(course.get("desktopAvailable", True)),
-                            created_by=str(course.get("createdBy") or course.get("CreatedBy") or ""),
-                            creation_stage=str(course.get("creationStage") or course.get("CreationStage") or ""),
-                            publish_status=publish_status,
-                            is_deleted=bool(course.get("isDeleted", False)),
-                            deleted_by=str(course.get("deletedBy") or ""),
-                            deleted_at=course.get("deletedAt"),
-                            created_at=course.get("createdAt"),
-                        )
-                    )
-                except Exception as inner_err:
-                    logger.error(f"Skipping course {course.get('_id')} due to error: {inner_err}")
-                    continue
+            # === Counts should be from NON-DELETED only ===
+            total_count_to_return = len(non_deleted)
 
-            total_count = await courses_collection.count_documents(query_filter)
+            status_counts_list: List[StatusCountType] = []
+            if statusCount:
+                counter = Counter([x.publish_status for x in non_deleted])
+                status_counts_list = [StatusCountType(status=k, count=v) for k, v in counter.items()]
 
-            # Convert dict → list of StatusCountType for GraphQL
-            status_counts = [
-                StatusCountType(status=k, count=v) for k, v in status_counter.items()
-            ]
+            # courses list respects is_deleted filter (detail payload)
+            if is_deleted is True:
+                detail_list = deleted
+            elif is_deleted is False:
+                detail_list = non_deleted
+            else:
+                detail_list = all_courses_norm
+
+            # Sort details by created_at desc
+            def sort_key(x: CourseDetailsType):
+                return x.created_at if isinstance(x.created_at, datetime) else datetime(MINYEAR, 1, 1)
+            detail_list.sort(key=sort_key, reverse=True)
 
             logger.info(
-                f"all_courses: fetched {len(courses_list)} courses | total={total_count} | status_counts={status_counter}"
+                "all_courses: total_non_deleted=%s | deleted=%s | returned_detail=%s | statusCount=%s",
+                len(non_deleted), len(deleted), len(detail_list), statusCount
             )
 
             return CourseListResponse(
-                total_count=total_count,
-                status_counts=status_counts,
-                courses=courses_list,
+                total_count=total_count_to_return,   # <-- ONLY non-deleted
+                status_counts=status_counts_list,    # <-- ONLY non-deleted when requested
+                courses=detail_list,                 # <-- respects isDeleted arg
             )
 
         except Exception as e:
             logger.error(f"all_courses: MongoDB Error: {str(e)}")
-            print(f"MongoDB Error: {e}")
             return CourseListResponse(total_count=0, status_counts=[], courses=[])
 
 
-    @strawberry.field
-    async def get_package_counts() -> PackageCountResponse:
+    @strawberry.field(name="getPackageCounts")
+    async def get_package_counts(
+        self,
+        is_deleted: Optional[bool] = None,   # None -> all; True -> only deleted; False -> only non-deleted (for detail list)
+        statusCount: Optional[bool] = False  # if True, include status histogram computed only on non-deleted
+    ) -> PackageCountResponse:
         """
-        Returns total package count, status-wise counts, and package summaries
-        using PackageDetailsType.
+        Packages API with aligned behavior:
+        - packages (detail list): respects `is_deleted` filter (None -> all; True -> only deleted; False -> only non-deleted)
+        - total_count: count of NON-DELETED packages
+        - status_counts: histogram of status for NON-DELETED packages (only when statusCount=True)
         """
         try:
-            query_filter = {
-                "$or": [
-                    {"isDeleted": False},
-                    {"isDeleted": {"$exists": False}},
-                    {"isDeleted": "False"},
-                ]
+            # Fetch once; include fields we actually use
+            projection = {
+                "_id": 1,
+                "title": 1,
+                "description": 1,
+                "course_ids": 1,
+                "status": 1, "Status": 1,
+                "isActive": 1,
+                "isDeleted": 1,
+                "isDraft": 1,
+                "createdAt": 1,
+                "created_at": 1,
+                "updatedAt": 1,
+                "createdBy": 1,
+                "updatedBy": 1,
+                "deletedAt": 1,
+                "deletedBy": 1,
+                # optional visuals/extra
+                "bannerUrl": 1,
+                "themeUrl": 1,
+                "banner_base64": 1,
+                "theme_base64": 1,
+                "price_details": 1,
+                "telegram_id": 1,
+                "faqs": 1,
             }
+            cursor = packages_collection.find({}, projection=projection)
 
-            packages_cursor = packages_collection.find(query_filter)
-            status_counter = {}
-            total_count = 0
-            packages_list = []
+            def norm_bool(v) -> bool:
+                if isinstance(v, bool): return v
+                if isinstance(v, (int, float)): return v == 1
+                if isinstance(v, str): return v.strip().lower() in {"true","1","yes","y"}
+                return False
 
-            async for pkg in packages_cursor:
-                total_count += 1
+            def safe_dt(*xs) -> datetime:
+                for x in xs:
+                    if isinstance(x, datetime):
+                        return x
+                return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-                # --- Status ---
-                status = (pkg.get("status") or pkg.get("Status") or "Unknown").strip()
-                if not status:
-                    status = "Unknown"
-                status_counter[status] = status_counter.get(status, 0) + 1
+            def pick_status(doc: Dict[str, Any]) -> str:
+                s = (doc.get("status") or doc.get("Status") or "").strip()
+                return s if s else "Unknown"
 
-                # --- Prepare PackageDetailsType (minimal fields for counts view) ---
-                packages_list.append(
-                    PackageDetailsType(
-                        id=str(pkg.get("_id", "")),
-                        title=pkg.get("title", ""),
-                        description=pkg.get("description", ""),
-                        course_ids=pkg.get("course_ids", []),
-                        status=status,
-                        is_active=pkg.get("isActive", False),
-                        is_deleted=pkg.get("isDeleted", False),
-                        is_draft=pkg.get("isDraft", False),
-                        created_at=pkg.get("createdAt", None),
-                        updated_at=pkg.get("updatedAt", None),
-                        created_by=pkg.get("createdBy", None),
-                        updated_by=pkg.get("updatedBy", None),
-                        deleted_at=pkg.get("deletedAt", None),
-                        deleted_by=pkg.get("deletedBy", None),
-                        # Optional fields remain None
-                        banner_url=None,
-                        theme_url=None,
-                        banner_base64=None,
-                        theme_base64=None,
-                        price_details=None,
-                        course_details=None,
-                        telegram_id=None,
-                        faqs=None
-                    )
+            def to_pkg(doc: Dict[str, Any]) -> PackageDetailsType:
+                # normalize course_ids to str[]
+                cis = doc.get("course_ids") or []
+                cis = [str(x) for x in cis] if isinstance(cis, list) else []
+
+                return PackageDetailsType(
+                    id=str(doc.get("_id", "")),
+                    title=str(doc.get("title") or ""),
+                    description=str(doc.get("description") or ""),
+                    course_ids=cis,
+                    status=pick_status(doc),
+                    is_active=bool(doc.get("isActive", False)),
+                    is_deleted=norm_bool(doc.get("isDeleted")),
+                    is_draft=bool(doc.get("isDraft", False)),
+                    created_at=safe_dt(doc.get("createdAt"), doc.get("created_at"), doc.get("updatedAt")),
+                    updated_at=doc.get("updatedAt"),
+                    created_by=doc.get("createdBy"),
+                    updated_by=doc.get("updatedBy"),
+                    deleted_at=doc.get("deletedAt"),
+                    deleted_by=doc.get("deletedBy"),
+                    # optional visuals/extra (pass-through if present)
+                    banner_url=doc.get("bannerUrl"),
+                    theme_url=doc.get("themeUrl"),
+                    banner_base64=doc.get("banner_base64"),
+                    theme_base64=doc.get("theme_base64"),
+                    price_details=doc.get("price_details"),
+                    course_details=None,
+                    telegram_id=doc.get("telegram_id"),
+                    faqs=doc.get("faqs"),
                 )
 
-            # Convert dict → list of Strawberry types for status counts
-            status_counts_list = [
-                PackageStatusCountType(status=k, count=v) for k, v in status_counter.items()
-            ]
+            # Load & normalize
+            all_pkgs: List[PackageDetailsType] = []
+            async for d in cursor:
+                all_pkgs.append(to_pkg(d))
+
+            # Split once
+            non_deleted = [p for p in all_pkgs if not p.is_deleted]
+            deleted = [p for p in all_pkgs if p.is_deleted]
+
+            # === Counts ONLY from NON-DELETED ===
+            total_count = len(non_deleted)
+
+            status_counts: List[PackageStatusCountType] = []
+            if statusCount:
+                counter = Counter(p.status for p in non_deleted)
+                status_counts = [PackageStatusCountType(status=s, count=c) for s, c in counter.items()]
+
+            # Detail list respects is_deleted filter
+            if is_deleted is True:
+                detail_list = deleted
+            elif is_deleted is False:
+                detail_list = non_deleted
+            else:
+                detail_list = all_pkgs
+
+            # Sort by created_at desc
+            def sort_key(p: PackageDetailsType):
+                return p.created_at if isinstance(p.created_at, datetime) else datetime(MINYEAR, 1, 1)
+            detail_list.sort(key=sort_key, reverse=True)
 
             logger.info(
-                f"get_package_counts: total={total_count}, status_counts={status_counter}, packages={len(packages_list)}"
+                "get_package_counts: total_non_deleted=%s | deleted=%s | returned_detail=%s | statusCount=%s",
+                len(non_deleted), len(deleted), len(detail_list), statusCount
             )
 
             return PackageCountResponse(
-                total_count=total_count,
-                status_counts=status_counts_list,
-                packages=packages_list
+                total_count=total_count,           # ONLY non-deleted
+                status_counts=status_counts,       # ONLY non-deleted when requested
+                packages=detail_list,              # respects is_deleted arg
             )
 
         except Exception as e:
