@@ -1,18 +1,3 @@
-# models.py
-# Libraries to install:
-# pip install pydantic "pydantic[email]"
-
-from pydantic import BaseModel, Field, EmailStr
-from datetime import datetime
-from typing import Optional
-from bson import ObjectId
-
-# --- Database Models (Pydantic) ---
-
-# models.py
-# Libraries to install:
-# pip install pydantic "pydantic[email]"
-
 from pydantic import BaseModel, Field, EmailStr
 from datetime import datetime
 from typing import Optional, List
@@ -127,3 +112,69 @@ class PurchasedModel(BaseModel):
     courses: List[CourseProgressModel]
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+
+class CourseWatchModel(BaseModel):
+    lesson_id: str
+    watch_time: float  # in seconds or minutes (based on your logic)
+
+# class CourseProgressModel(BaseModel):
+#     id: Optional[str] = Field(alias="_id", default=None)
+#     user_id: str
+#     course_id: str
+#     lesson_ids: List[str]  # array of lesson IDs
+#     lesson_duration: list[float]  # total duration of all lessons (in minutes or seconds)
+#     course_duration: float  # total duration of the course
+#     watch_times: List[CourseWatchModel]  # array of lessons with watch times
+#     total_watch_time: float  # total watched time (sum of watch_times)
+#     created_at: datetime = Field(default_factory=datetime.utcnow)
+#     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# class CourseProgressModel(BaseModel):
+#     id: Optional[str] = Field(alias="_id", default=None)
+#     user_id: str
+#     course_id: str
+    
+#     # --- New Optional Fields ---
+#     package_id: Optional[str] = None  # To track which package this was from
+#     expiry: Optional[datetime] = None # The expiry date for this course access
+    
+#     # --- Existing Fields ---
+#     lesson_ids: List[str]      # array of lesson IDs
+#     lesson_duration: list[float]  # total duration of all lessons
+#     course_duration: float     # total duration of the course
+#     watch_times: List[CourseWatchModel]  # array of lessons with watch times
+#     total_watch_time: float    # total watched time (sum of watch_times)
+#     created_at: datetime = Field(default_factory=datetime.utcnow)
+#     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CourseProgressModel(BaseModel):
+    id: Optional[str] = Field(alias="_id", default=None)
+    user_id: str
+    course_id: str
+    package_id: Optional[str] = None
+    expiry: Optional[datetime] = None
+    lesson_ids: List[str]
+    lesson_duration: list[float]
+    course_duration: float
+    watch_times: List[CourseWatchModel]
+    total_watch_time: float
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # --- ⭐️ ADD THIS VALIDATOR ⭐️ ---
+    @field_validator('id', mode='before')
+    @classmethod
+    def convert_objectid_to_str(cls, v):
+        """Converts the MongoDB _id (ObjectId) to a string."""
+        if isinstance(v, ObjectId):
+            return str(v)
+        return v
+
+    class Config:
+        # This tells Pydantic to allow the 'id' field to be
+        # populated by the '_id' alias when loading from a dict.
+        populate_by_name = True

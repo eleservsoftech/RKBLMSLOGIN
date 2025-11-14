@@ -42,4 +42,10 @@ package_bundle_collection = database.get_collection("package_bundles")
 # --- New Purchased Table ---
 purchased_collection = database.get_collection("purchasedtable")
 
+courseprice_collection = database.get_collection("courseprice")
+
+courselession_table = database.get_collection("coursemodulelessons")
+
+progress_collection = database.get_collection("courseprogress")
+
 print("MongoDB connection successful!")
