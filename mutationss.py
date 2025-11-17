@@ -66,6 +66,15 @@ from authenticate import AuthenticatedUser
 # --- GraphQL Types ---
 
 @strawberry.type
+class RefreshProgressResponse:
+    """
+    Response from the refresh_course_progress mutation.
+    """
+    success: bool
+    message: str
+    updated_count: int
+
+@strawberry.type
 class LessonPercentageType:
     """
     Holds the calculated progress for a single lesson.
@@ -634,23 +643,28 @@ async def fetch_video_lessons_data(course_id: str) -> Tuple[List[str], List[floa
     
 def parse_period_to_expiry_date(period_str: Optional[str]) -> Optional[datetime]:
     """
-    Parses a string like "3months" or "1year" into a future datetime.
+    Parses a string like "3months", "1year", or "65" into a future datetime.
+    If only a number is provided, it is treated as days.
     """
     if not period_str:
         return None
     
     now = datetime.utcnow()
     
-    # Regex to find the number (e.g., "3") and unit (e.g., "month")
-    match = re.match(r"(\d+)\s*(month|year|day|week)s?", period_str, re.IGNORECASE)
+    match = re.match(r"(\d+)\s*(month|year|day|week)?s?$", period_str, re.IGNORECASE)
     
     if not match:
-        print(f"❌ Could not parse period string: {period_str}")
+        # Changed to logger.warning
+        logger.warning(f"Could not parse period string: {period_str}")
         return None
         
     value = int(match.group(1))
-    unit = match.group(2).lower()
+    unit_match = match.group(2)
     
+    unit = "day" 
+    if unit_match:
+        unit = unit_match.lower()
+        
     try:
         if unit == "month":
             return now + relativedelta(months=value)
@@ -661,10 +675,10 @@ def parse_period_to_expiry_date(period_str: Optional[str]) -> Optional[datetime]
         elif unit == "day":
             return now + relativedelta(days=value)
     except Exception as e:
-        print(f"❌ Error calculating expiry: {e}")
+        # Changed to logger.error
+        logger.error(f"Error calculating expiry: {e}")
         return None
     
-    print(f"❌ Unknown unit in period string: {period_str}")
     return None
 
 def calculate_progress_percentage(watch_time: float, duration: float) -> float:
@@ -2448,32 +2462,36 @@ class Mutation:
         user_id: str, 
         course_id: Optional[str] = None,
         package_id: Optional[str] = None,
-        expiry: Optional[str] = None  
+        expiry: Optional[str] = None     
     ) -> list[CourseProgressType]:
         """
         Initializes course progress for a user.
         Provide EITHER course_id OR package_id.
+        
+        Expiry logic:
+        - For course_id: Uses the 'expiry' param if provided.
+        - For package_id: 
+        1. Uses the 'expiry' param if provided.
+        2. If 'expiry' is null, falls back to the expiry on the package doc.
         """
 
         if (course_id and package_id) or (not course_id and not package_id):
             raise Exception("Error: You must provide either 'course_id' OR 'package_id', but not both.")
-
-        if package_id and expiry:
-            print("ℹ️ User-passed 'expiry' is ignored when 'package_id' is provided (using package expiry).")
-
         
         new_progress_models = []
         progress_docs_to_insert = []
         
         # --- PATH A: Single Course ---
         if course_id:
-            print(f"🔥 Initializing single course progress for User {user_id} on Course {course_id}")
+            # Changed to logger.info
+            logger.info(f"Initializing single course progress for User {user_id} on Course {course_id}")
             
             course_expiry_date: Optional[datetime] = None
             if expiry:
                 course_expiry_date = parse_period_to_expiry_date(expiry)
                 if not course_expiry_date:
-                    print(f"⚠️ Could not parse expiry string '{expiry}'. Expiry will be null.")
+                    # Changed to logger.warning
+                    logger.warning(f"Could not parse expiry string '{expiry}'. Expiry will be null.")
 
             try:
                 lesson_ids, lesson_durations, course_duration = await fetch_video_lessons_data(course_id)
@@ -2498,13 +2516,15 @@ class Mutation:
                 new_progress_models.append(new_progress)
                 
             except Exception as e:
-                print(f"❌ FAILED to process single course {course_id}: {e}.")
+                # Changed to logger.error
+                logger.error(f"FAILED to process single course {course_id}: {e}.")
                 raise Exception(f"Failed to initialize course: {e}")
 
 
         # --- PATH B: Package ---
         elif package_id:
-            print(f"🔥 Initializing package progress for User {user_id} on Package {package_id}")
+            # Changed to logger.info
+            logger.info(f"Initializing package progress for User {user_id} on Package {package_id}")
             
             package_doc = await packages_collection.find_one({"_id": ObjectId(package_id)})
             if not package_doc:
@@ -2514,19 +2534,41 @@ class Mutation:
             if not course_ids_in_package:
                 raise Exception(f"Package {package_id} contains no course_ids.")
                 
-            package_expiry_date = None
-            try:
-                period_str = (package_doc.get("price_details", [{}])[0]).get("period")
-                if period_str:
-                    package_expiry_date = parse_period_to_expiry_date(period_str)
-                    print(f"ℹ️ Package expiry set to: {package_expiry_date} (from '{period_str}')")
-            except Exception as e:
-                print(f"⚠️ Error parsing package expiry: {e}")
+            # --- NEW EXPIRY LOGIC ---
+            package_expiry_date: Optional[datetime] = None
+            
+            if expiry:
+                # 1. Use user-provided expiry if it exists
+                # Changed to logger.info
+                logger.info(f"User provided an expiry for the package: '{expiry}'")
+                package_expiry_date = parse_period_to_expiry_date(expiry)
+                if not package_expiry_date:
+                    # Changed to logger.warning
+                    logger.warning(f"Could not parse user-provided expiry string '{expiry}'. Expiry will be null.")
+            
+            else:
+                # 2. Fallback to package document if no expiry was passed
+                # Changed to logger.info
+                logger.info("No expiry provided by user. Checking package document...")
+                try:
+                    period_str = (package_doc.get("price_details", [{}])[0]).get("period")
+                    if period_str:
+                        package_expiry_date = parse_period_to_expiry_date(period_str)
+                        # Changed to logger.info
+                        logger.info(f"Package expiry set from DB: {package_expiry_date} (from '{period_str}')")
+                    else:
+                        # Changed to logger.info
+                        logger.info("No period found in package document. Expiry will be null.")
+                except Exception as e:
+                    # Changed to logger.warning
+                    logger.warning(f"Error parsing package expiry from DB: {e}. Expiry will be null.")
+            # --- END NEW EXPIRY LOGIC ---
                 
             # --- ROBUST LOOP FIX ---
             for cid in course_ids_in_package:
                 try:
-                    print(f"  -> Processing course {cid} in package...")
+                    # Changed to logger.info
+                    logger.info(f"Processing course {cid} in package...")
                     lesson_ids, lesson_durations, course_duration = await fetch_video_lessons_data(cid)
                     
                     initial_watch_times = [
@@ -2546,17 +2588,20 @@ class Mutation:
                     )
                     progress_docs_to_insert.append(new_progress.model_dump(by_alias=True, exclude_none=True))
                     new_progress_models.append(new_progress)
-                    print(f"  ✅ Added course {cid} to be initialized.")
+                    # Changed to logger.info
+                    logger.info(f"Added course {cid} to be initialized.")
 
                 except Exception as e:
                     # This is the key: if one course fails, log it and continue
-                    print(f"  ❌ FAILED to process course {cid}: {e}. Skipping this course.")
+                    # Changed to logger.error
+                    logger.error(f"FAILED to process course {cid}: {e}. Skipping this course.")
                     continue 
             # --- END ROBUST LOOP FIX ---
 
         # --- 3. Save to MongoDB ---
         if not progress_docs_to_insert:
-            print("ℹ️ No progress documents to insert.")
+            # Changed to logger.info
+            logger.info("No progress documents to insert.")
             return []
 
         try:
@@ -2566,19 +2611,22 @@ class Mutation:
             for model, new_id in zip(new_progress_models, inserted_ids):
                 model.id = str(new_id) 
                 
-            print(f"✅ {len(inserted_ids)} progress document(s) saved.")
+            # Changed to logger.info
+            logger.info(f"{len(inserted_ids)} progress document(s) saved.")
 
             return [CourseProgressType.from_pydantic(model) for model in new_progress_models]
 
         except Exception as e:
-            print(f" Error saving progress to MongoDB: {e}")
+            # Changed to logger.error
+            logger.error(f"Error saving progress to MongoDB: {e}")
             raise Exception(f"Database insertion failed: {e}")
     
     # --- Enhanced Update Function ---
 
     @strawberry.mutation
     async def update_lesson_watch_time(self, data: LessonWatchTimeInput) -> UpdateWatchTimeResponse:
-        print(f"Incoming new_watch_time_seconds: {data.new_watch_time_seconds}")
+        # Changed to logger.info
+        logger.info(f"Incoming new_watch_time_seconds: {data.new_watch_time_seconds}")
 
         # --- Get ID values ---
         user_id_str = data.user_id
@@ -2594,10 +2642,12 @@ class Mutation:
         
         if not doc:
             message = f"No document found for user_id/course_id: {user_id_str}, {course_id_str}"
-            print(f"❌ {message}")
+            # Changed to logger.warning
+            logger.warning(message)
             return UpdateWatchTimeResponse(success=False, message=message)
             
-        print("✅ User/Course document found.")
+        # Changed to logger.info
+        logger.info("User/Course document found.")
 
         # --- LESSON DURATION VALIDATION ---
         try:
@@ -2608,12 +2658,14 @@ class Mutation:
                 lesson_index = lesson_ids.index(lesson_id_str)
             except ValueError:
                 message = f"Lesson ID {lesson_id_str} not found in lesson_ids array."
-                print(f"❌ {message}")
+                # Changed to logger.warning
+                logger.warning(message)
                 return UpdateWatchTimeResponse(success=False, message=message)
 
             if lesson_index >= len(lesson_durations):
                 message = "Data mismatch: lesson_ids and lesson_duration arrays have different lengths."
-                print(f"❌ {message}")
+                # Changed to logger.error
+                logger.error(message)
                 return UpdateWatchTimeResponse(success=False, message=message)
                 
             max_duration = lesson_durations[lesson_index]
@@ -2621,14 +2673,17 @@ class Mutation:
             # This is the validation you asked for:
             if new_watch_time > max_duration:
                 message = f"VALIDATION FAILED: New watch time ({new_watch_time}) exceeds lesson duration ({max_duration})."
-                print(f"❌ {message}")
+                # Changed to logger.warning
+                logger.warning(message)
                 return UpdateWatchTimeResponse(success=False, message=message)
             
-            print(f"✅ Lesson validation passed: New time {new_watch_time} <= max duration {max_duration}.")
+            # Changed to logger.info
+            logger.info(f"Lesson validation passed: New time {new_watch_time} <= max duration {max_duration}.")
 
         except Exception as e:
             message = f"Error during validation: {e}"
-            print(f"❌ {message}")
+            # Changed to logger.error
+            logger.error(message)
             return UpdateWatchTimeResponse(success=False, message=str(e))
         # --- END LESSON VALIDATION ---
 
@@ -2695,19 +2750,124 @@ class Mutation:
                 pipeline,
             )
             
-            print("Matched:", result.matched_count, "Modified:", result.modified_count)
+            # Changed to logger.info
+            logger.info(f"Update result: Matched={result.matched_count}, Modified={result.modified_count}")
             
             if result.matched_count == 1:
                 return UpdateWatchTimeResponse(success=True, message="Update successful")
             else:
                 message = "Update failed: Document not found during update operation."
-                print(f" {message}")
+                # Changed to logger.warning
+                logger.warning(message)
                 return UpdateWatchTimeResponse(success=False, message=message)
-            
+                
         except Exception as e:
             message = f"Error updating watch time: {e}"
-            print(f" {message}")
+            # Changed to logger.error
+            logger.error(message)
             return UpdateWatchTimeResponse(success=False, message=str(e))
+
+    @strawberry.mutation
+    async def refresh_course_progress(
+        self, 
+        course_id: str
+    ) -> RefreshProgressResponse:
+        """
+        Refreshes all user progress documents for a given course.
+        
+        This fetches the latest lesson list for the course and updates all
+        user progress records to match. It preserves existing watch times
+        and adds new lessons with 0 watch time.
+        """
+        # Changed to logger.info
+        logger.info(f"Refreshing progress for all users on Course {course_id}")
+
+        # --- 1. Fetch new lesson data ---
+        try:
+            new_lesson_ids, new_lesson_durations, new_course_duration = \
+                await fetch_video_lessons_data(course_id)
+        except Exception as e:
+            message = f"Failed to fetch video data for course {course_id}: {e}"
+            # Changed to logger.error
+            logger.error(message)
+            return RefreshProgressResponse(success=False, message=message, updated_count=0)
+
+        # --- 2. Build the Update Pipeline ---
+        # This pipeline will run for *every* document that matches.
+        pipeline = [
+            # --- Stage 1: Update simple fields and rebuild watch_times ---
+            {
+                "$set": {
+                    "lesson_ids": new_lesson_ids,
+                    "lesson_duration": new_lesson_durations,
+                    "course_duration": new_course_duration,
+                    "updated_at": datetime.now(timezone.utc),
+                    
+                    # Rebuild the watch_times array
+                    "watch_times": {
+                        "$map": {
+                            "input": new_lesson_ids, # Iterate over the NEW lesson list
+                            "as": "new_lesson_id",
+                            "in": {
+                                "lesson_id": "$$new_lesson_id",
+                                "watch_time": {
+                                    # Find the matching lesson in the OLD $watch_times array
+                                    "$let": {
+                                        "vars": {
+                                            "old_lesson": {
+                                                "$arrayElemAt": [
+                                                    {
+                                                        "$filter": {
+                                                            "input": "$watch_times", # The doc's old array
+                                                            "as": "wt",
+                                                            "cond": {"$eq": ["$$wt.lesson_id", "$$new_lesson_id"]}
+                                                        }
+                                                    }, 0
+                                                ]
+                                            }
+                                        },
+                                        # Use the old watch time, or default to 0.0
+                                        "in": {"$ifNull": ["$$old_lesson.watch_time", 0.0]} 
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            # --- Stage 2: Recalculate total_watch_time ---
+            # This runs after 'watch_times' is set by Stage 1
+            {
+                "$set": {
+                    "total_watch_time": {
+                        # Sum up all the 'watch_time' fields in the new array
+                        "$sum": "$watch_times.watch_time" 
+                    }
+                }
+            }
+        ]
+
+        # --- 3. Run update_many ---
+        try:
+            result = await progress_collection.update_many(
+                {"course_id": course_id}, # Filter: find all docs for this course
+                pipeline                  # Pipeline: apply all the changes
+            )
+            
+            message = f"Successfully refreshed progress for {result.modified_count} users."
+            # Changed to logger.info
+            logger.info(message)
+            return RefreshProgressResponse(
+                success=True, 
+                message=message, 
+                updated_count=result.modified_count
+            )
+
+        except Exception as e:
+            message = f"Database error during refresh: {e}"
+            # Changed to logger.error
+            logger.error(message)
+            return RefreshProgressResponse(success=False, message=message, updated_count=0)
 
 
 # Create the schema
