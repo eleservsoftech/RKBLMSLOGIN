@@ -1053,6 +1053,213 @@ class Query:
             return []
         
 
+    # @strawberry.field
+    # async def get_purchase_data(
+    #     self,
+    #     filter: Optional[PurchaseFilterInput] = None
+    # ) -> Optional[AdminAnalysisOutput | UserPurchaseOutput | AllPurchaseOutput]:
+
+    #     query: Dict[str, Any] = {}
+    #     if filter:
+    #         if filter.user_id:
+    #             query["user_id"] = filter.user_id
+    #         if filter.start_date and filter.end_date:
+    #             query["created_at"] = {"$gte": filter.start_date, "$lte": filter.end_date}
+
+    #     # Pull all first, then organize consistently
+    #     purchases = await purchased_collection.find(query).to_list(None)
+
+    #     # ------ normalize/defensive defaults + sort purchases by created_at desc ------
+    #     def _safe_dt(x):
+    #         return x if isinstance(x, datetime) else datetime.min
+
+    #     for p in purchases:
+    #         p.setdefault("courses", [])
+    #         p.setdefault("package_id", None)
+    #         p.setdefault("created_at", None)
+
+    #         # sort courses by course_id for predictability
+    #         p["courses"] = sorted(
+    #             (p.get("courses") or []),
+    #             key=lambda c: str(c.get("course_id", ""))
+    #         )
+
+    #     purchases.sort(key=lambda x: _safe_dt(x.get("created_at")), reverse=True)
+
+    #     # ---------- 1) Admin analytics (ENHANCED + ORGANIZED) ----------
+    #     if filter and filter.admin_analysis:
+    #         total_users = len({p.get("user_id") for p in purchases})
+    #         total_purchases = len(purchases)
+    #         all_courses = [course for p in purchases for course in (p.get("courses") or [])]
+    #         total_courses = len(all_courses)
+
+    #         completed_courses = sum(
+    #             1 for c in all_courses
+    #             if float(c.get("course_view_percent", 0) or 0) >= 100.0
+    #         )
+
+    #         # certificate boolean counts
+    #         certificate_sent_true = sum(1 for c in all_courses if bool(c.get("certificate_sent")) is True)
+    #         certificate_sent_false = total_courses - certificate_sent_true
+
+    #         # Users having any true/false certs
+    #         users_with_true: Set[str] = set()
+    #         users_with_false: Set[str] = set()
+    #         for p in purchases:
+    #             uid = str(p.get("user_id"))
+    #             cs = p.get("courses") or []
+    #             if any(bool(c.get("certificate_sent")) is True for c in cs):
+    #                 users_with_true.add(uid)
+    #             if any(not bool(c.get("certificate_sent", False)) for c in cs):
+    #                 users_with_false.add(uid)
+
+    #         def _coerce_list_to_ids(id_set: Set[str]) -> List[Any]:
+    #             return [_to_maybe_object_id(s) for s in id_set if s]
+
+    #         true_ids = _coerce_list_to_ids(users_with_true)
+    #         false_ids = _coerce_list_to_ids(users_with_false)
+
+    #         certificate_sent_true_users_docs = []
+    #         if true_ids:
+    #             certificate_sent_true_users_docs = await users_collection.find(
+    #                 {"_id": {"$in": true_ids}},
+    #                 projection={
+    #                     "_id": 1, "name": 1, "email": 1, "phone": 1, "mobile": 1,
+    #                     "contact": 1, "phoneNumber": 1, "usertype": 1,
+    #                     "usertype_id": 1, "userTypeId": 1, "user_type_id": 1,
+    #                     "isActive": 1, "isDeleted": 1, "createdAt": 1
+    #                 }
+    #             ).to_list(None)
+
+    #         certificate_sent_false_users_docs = []
+    #         if false_ids:
+    #             certificate_sent_false_users_docs = await users_collection.find(
+    #                 {"_id": {"$in": false_ids}},
+    #                 projection={
+    #                     "_id": 1, "name": 1, "email": 1, "phone": 1, "mobile": 1,
+    #                     "contact": 1, "phoneNumber": 1, "usertype": 1,
+    #                     "usertype_id": 1, "userTypeId": 1, "user_type_id": 1,
+    #                     "isActive": 1, "isDeleted": 1, "createdAt": 1
+    #                 }
+    #             ).to_list(None)
+
+    #         # map → GraphQL type
+    #         true_users = [_map_user_doc_to_type(d) for d in certificate_sent_true_users_docs]
+    #         false_users = [_map_user_doc_to_type(d) for d in certificate_sent_false_users_docs]
+
+    #         def _created_at_safe(u: UserType) -> datetime:
+    #             return u.created_at if isinstance(u.created_at, datetime) else datetime.min
+
+    #         true_users.sort(key=_created_at_safe, reverse=True)
+    #         false_users.sort(key=_created_at_safe, reverse=True)
+
+    #         # ---------- Most purchased courses & packages (sorted descending by count) ----------
+    #         course_counter = Counter()
+    #         for c in all_courses:
+    #             cid = c.get("course_id")
+    #             if cid:
+    #                 course_counter[str(cid)] += 1
+
+    #         package_counter = Counter()
+    #         for p in purchases:
+    #             pid = p.get("package_id")
+    #             if pid:
+    #                 package_counter[str(pid)] += 1
+
+    #         def _sorted_counter_items(counter: Counter) -> List[Tuple[str, int]]:
+    #             return sorted(counter.items(), key=lambda t: (-t[1], t[0]))
+
+    #         sorted_courses = _sorted_counter_items(course_counter)
+    #         sorted_packages = _sorted_counter_items(package_counter)
+
+    #         most_purchased_course = sorted_courses[0][0] if sorted_courses else None
+    #         most_purchased_package = sorted_packages[0][0] if sorted_packages else None
+
+    #         # Hydrate top single details
+    #         most_purchased_course_details: Optional[CourseDetailsType] = None
+    #         if most_purchased_course:
+    #             cdoc = await courses_collection.find_one({"_id": _to_maybe_object_id(most_purchased_course)})
+    #             if cdoc:
+    #                 most_purchased_course_details = _map_course_doc_to_type(cdoc)
+
+    #         most_purchased_package_details: Optional[PackageDetailsType] = None
+    #         if most_purchased_package:
+    #             pdoc = await packages_collection.find_one({"_id": _to_maybe_object_id(most_purchased_package)})
+    #             if pdoc:
+    #                 most_purchased_package_details = _map_package_doc_to_type(pdoc)
+
+    #         # Hydrate full sorted lists
+    #         purchased_courses_details: List[CourseDetailsType] = []
+    #         for cid, count in sorted_courses:
+    #             cdoc = await courses_collection.find_one({"_id": _to_maybe_object_id(cid)})
+    #             if cdoc:
+    #                 ctype = _map_course_doc_to_type(cdoc)
+    #                 setattr(ctype, "purchase_count", count)
+    #                 purchased_courses_details.append(ctype)
+
+    #         purchased_packages_details: List[PackageDetailsType] = []
+    #         for pid, count in sorted_packages:
+    #             pdoc = await packages_collection.find_one({"_id": _to_maybe_object_id(pid)})
+    #             if pdoc:
+    #                 ptype = _map_package_doc_to_type(pdoc)
+    #                 setattr(ptype, "purchase_count", count)
+    #                 purchased_packages_details.append(ptype)
+
+    #         return AdminAnalysisOutput(
+    #             total_users=total_users,
+    #             total_purchases=total_purchases,
+    #             total_courses=total_courses,
+    #             completed_courses=completed_courses,
+    #             certificate_sent_true=certificate_sent_true,
+    #             certificate_sent_false=certificate_sent_false,
+    #             certificate_sent_true_users=true_users,
+    #             certificate_sent_false_users=false_users,
+    #             most_purchased_course=most_purchased_course,
+    #             most_purchased_package=most_purchased_package,
+    #             most_purchased_course_details=most_purchased_course_details,
+    #             most_purchased_package_details=most_purchased_package_details,
+    #             all_purchased_courses=purchased_courses_details,
+    #             all_purchased_packages=purchased_packages_details,
+    #         )
+
+    #     # ---------- 2) User purchases (organized + purchase_id added) ----------
+    #     if filter and filter.user_id:
+    #         user_purchases = [
+    #             PurchaseOutput(
+    #                 purchase_id=str(p.get("_id", "")),  # ✅ Added purchase_id
+    #                 package_id=p.get("package_id"),
+    #                 courses=[
+    #                     CourseOutput(
+    #                         course_id=str(c.get("course_id", "")),
+    #                         course_view_percent=float(c.get("course_view_percent", 0.0) or 0.0),
+    #                         certificate_sent=bool(c.get("certificate_sent", False)),
+    #                     )
+    #                     for c in (p.get("courses") or [])
+    #                 ],
+    #                 created_at=p.get("created_at"),
+    #             )
+    #             for p in purchases
+    #         ]
+    #         return UserPurchaseOutput(user_id=filter.user_id, purchases=user_purchases)
+
+    #     # ---------- 3) All purchases (organized) ----------
+    #     all_purchases = [
+    #         PurchaseOutput(
+    #             package_id=p.get("package_id"),
+    #             courses=[
+    #                 CourseOutput(
+    #                     course_id=str(c.get("course_id", "")),
+    #                     course_view_percent=float(c.get("course_view_percent", 0.0) or 0.0),
+    #                     certificate_sent=bool(c.get("certificate_sent", False)),
+    #                 )
+    #                 for c in (p.get("courses") or [])
+    #             ],
+    #             created_at=p.get("created_at"),
+    #         )
+    #         for p in purchases
+    #     ]
+    #     return AllPurchaseOutput(all_purchases=all_purchases)
+
     @strawberry.field
     async def get_purchase_data(
         self,
@@ -1078,7 +1285,6 @@ class Query:
             p.setdefault("package_id", None)
             p.setdefault("created_at", None)
 
-            # sort courses by course_id for predictability
             p["courses"] = sorted(
                 (p.get("courses") or []),
                 key=lambda c: str(c.get("course_id", ""))
@@ -1086,7 +1292,7 @@ class Query:
 
         purchases.sort(key=lambda x: _safe_dt(x.get("created_at")), reverse=True)
 
-        # ---------- 1) Admin analytics (ENHANCED + ORGANIZED) ----------
+        # ---------- 1) Admin analytics ----------
         if filter and filter.admin_analysis:
             total_users = len({p.get("user_id") for p in purchases})
             total_purchases = len(purchases)
@@ -1095,14 +1301,12 @@ class Query:
 
             completed_courses = sum(
                 1 for c in all_courses
-                if float(c.get("course_view_percent", 0) or 0) >= 100.0
+                if float(c.get("course_view_percent", 0) or 0) >= 97.0
             )
 
-            # certificate boolean counts
             certificate_sent_true = sum(1 for c in all_courses if bool(c.get("certificate_sent")) is True)
             certificate_sent_false = total_courses - certificate_sent_true
 
-            # Users having any true/false certs
             users_with_true: Set[str] = set()
             users_with_false: Set[str] = set()
             for p in purchases:
@@ -1143,7 +1347,6 @@ class Query:
                     }
                 ).to_list(None)
 
-            # map → GraphQL type
             true_users = [_map_user_doc_to_type(d) for d in certificate_sent_true_users_docs]
             false_users = [_map_user_doc_to_type(d) for d in certificate_sent_false_users_docs]
 
@@ -1153,7 +1356,7 @@ class Query:
             true_users.sort(key=_created_at_safe, reverse=True)
             false_users.sort(key=_created_at_safe, reverse=True)
 
-            # ---------- Most purchased courses & packages (sorted descending by count) ----------
+            # Counter logic
             course_counter = Counter()
             for c in all_courses:
                 cid = c.get("course_id")
@@ -1175,12 +1378,36 @@ class Query:
             most_purchased_course = sorted_courses[0][0] if sorted_courses else None
             most_purchased_package = sorted_packages[0][0] if sorted_packages else None
 
+            # --- HELPER: Normalize DB Keys (Fixes Typo/Case Issues) ---
+            def normalize_course_doc(doc: dict):
+                # 1. Fix Typo: creatationStage -> creationStage
+                if "creatationStage" in doc:
+                    doc["creationStage"] = doc["creatationStage"]
+                
+                # 2. Fix Case: PublishStatus -> publishStatus
+                if "PublishStatus" in doc:
+                    doc["publishStatus"] = doc["PublishStatus"]
+
+                # 3. Fix Case: created_by -> createdBy
+                if "created_by" in doc:
+                    doc["createdBy"] = doc["created_by"]
+                return doc
+            # -----------------------------------------------------------
+
             # Hydrate top single details
             most_purchased_course_details: Optional[CourseDetailsType] = None
             if most_purchased_course:
                 cdoc = await courses_collection.find_one({"_id": _to_maybe_object_id(most_purchased_course)})
                 if cdoc:
+                    # 🔥 Fix DB keys BEFORE mapping
+                    cdoc = normalize_course_doc(cdoc)
                     most_purchased_course_details = _map_course_doc_to_type(cdoc)
+                    
+                    # 🔥 DOUBLE CHECK: Force attributes just in case mapper missed it
+                    most_purchased_course_details.createdBy = str(cdoc.get("createdBy") or cdoc.get("created_by") or "") if (cdoc.get("createdBy") or cdoc.get("created_by")) else None
+                    most_purchased_course_details.creationStage = cdoc.get("creationStage")
+                    most_purchased_course_details.publishStatus = cdoc.get("publishStatus")
+
 
             most_purchased_package_details: Optional[PackageDetailsType] = None
             if most_purchased_package:
@@ -1193,7 +1420,17 @@ class Query:
             for cid, count in sorted_courses:
                 cdoc = await courses_collection.find_one({"_id": _to_maybe_object_id(cid)})
                 if cdoc:
+                    # 🔥 Fix DB keys BEFORE mapping
+                    cdoc = normalize_course_doc(cdoc)
                     ctype = _map_course_doc_to_type(cdoc)
+                    
+                    # 🔥 DOUBLE CHECK: Force attributes
+                    if cdoc.get("createdBy") or cdoc.get("created_by"):
+                         ctype.createdBy = str(cdoc.get("createdBy") or cdoc.get("created_by"))
+                    
+                    ctype.creationStage = cdoc.get("creationStage")
+                    ctype.publishStatus = cdoc.get("publishStatus")
+
                     setattr(ctype, "purchase_count", count)
                     purchased_courses_details.append(ctype)
 
@@ -1222,11 +1459,11 @@ class Query:
                 all_purchased_packages=purchased_packages_details,
             )
 
-        # ---------- 2) User purchases (organized + purchase_id added) ----------
+        # ---------- 2) User purchases ----------
         if filter and filter.user_id:
             user_purchases = [
                 PurchaseOutput(
-                    purchase_id=str(p.get("_id", "")),  # ✅ Added purchase_id
+                    purchase_id=str(p.get("_id", "")),
                     package_id=p.get("package_id"),
                     courses=[
                         CourseOutput(
@@ -1242,7 +1479,7 @@ class Query:
             ]
             return UserPurchaseOutput(user_id=filter.user_id, purchases=user_purchases)
 
-        # ---------- 3) All purchases (organized) ----------
+        # ---------- 3) All purchases ----------
         all_purchases = [
             PurchaseOutput(
                 package_id=p.get("package_id"),
